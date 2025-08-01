@@ -1,0 +1,32 @@
+# This file lists the dependencies required to install and run the weight_perturbation library.
+# It includes core libraries for PyTorch-based models, optimal transport computations,
+# numerical operations, plotting, and configuration handling.
+# Versions are pinned to ensure reproducibility and compatibility.
+# Install using: pip install -r requirements.txt
+
+# Core deep learning framework
+torch>=2.0.0  # PyTorch for neural networks and tensor operations
+
+# Optimal transport library (used in losses.py for SamplesLoss)
+geomloss>=0.2.6  # For Sinkhorn divergences and Wasserstein distances
+
+# Numerical computing library
+numpy>=1.24.0  # For array manipulations and mathematical operations
+
+# Plotting library (used in utils.py for visualizations)
+matplotlib>=3.8.0  # For creating distribution plots and figures
+
+# YAML parsing for configuration files (used in utils.py)
+pyyaml>=6.0.1  # For loading hyperparameters from YAML configs
+
+# Optional: For type hinting and static analysis (not required at runtime)
+typing-extensions>=4.5.0  # For advanced type hints in Python 3.8+
+
+# Development dependencies (not required for core library usage, but for tests and examples)
+# pytest>=7.2.0  # For running unit tests (in tests/ directory)
+# setuptools>=65.0.0  # For packaging and distribution (in setup.py)
+# wheel>=0.38.0  # For building wheel packages
+
+# Note: If using CUDA, ensure torch is installed with CUDA support (e.g., torch==2.0.0+cu117).
+# For specific hardware, refer to https://pytorch.org/get-started/locally/.
+# This file can be extended with additional dependencies as needed for extensions or custom use cases.

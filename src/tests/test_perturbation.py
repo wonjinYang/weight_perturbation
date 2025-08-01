@@ -1,0 +1,269 @@
+import unittest
+import torch
+import numpy as np
+from typing import List
+
+from weight_perturbation.perturbation import WeightPerturberSection2, WeightPerturberSection3
+from weight_perturbation.models import Generator
+from weight_perturbation.samplers import sample_target_data, sample_evidence_domains
+from weight_perturbation.utils import parameters_to_vector, vector_to_parameters
+from weight_perturbation.losses import compute_wasserstein_distance
+from weight_perturbation.pretrain import pretrain_wgan_gp
+from weight_perturbation.samplers import sample_real_data
+
+class TestWeightPerturberSection2(unittest.TestCase):
+    """
+    Unit tests for WeightPerturberSection2 class in perturbation.py.
+    
+    These tests cover initialization, perturbation process, internal methods,
+    output validity, and error handling.
+    """
+
+    def setUp(self):
+        """
+        Set up common parameters, models, and data for tests.
+        """
+        self.noise_dim = 2
+        self.data_dim = 2
+        self.hidden_dim = 64  # Smaller for faster tests
+        self.device = torch.device('cpu')  # Use CPU for consistency
+        self.batch_size = 100
+        self.target_samples = sample_target_data(self.batch_size, device=self.device)
+        
+        # Pretrain a small generator for testing
+        self.generator = Generator(self.noise_dim, self.data_dim, self.hidden_dim).to(self.device)
+        self.critic = Generator(self.data_dim, self.hidden_dim).to(self.device)  # Reuse Generator as Critic for simplicity
+        real_sampler = lambda bs: sample_real_data(bs, device=self.device)
+        self.pretrained_gen, _ = pretrain_wgan_gp(
+            self.generator, self.critic, real_sampler,
+            epochs=10, batch_size=32, noise_dim=self.noise_dim, device=self.device.str, verbose=False
+        )
+
+    def test_initialization(self):
+        """
+        Test WeightPerturberSection2 initialization.
+        """
+        perturber = WeightPerturberSection2(self.pretrained_gen, self.target_samples)
+        self.assertIsInstance(perturber.generator, Generator)
+        self.assertEqual(perturber.target_samples.shape, (self.batch_size, self.data_dim))
+        self.assertEqual(perturber.device, self.device)
+        self.assertIn('noise_dim', perturber.config)
+        self.assertIn('eval_batch_size', perturber.config)
+
+    def test_initialization_custom_config(self):
+        """
+        Test initialization with custom config.
+        """
+        custom_config = {'noise_dim': 4, 'eval_batch_size': 200}
+        perturber = WeightPerturberSection2(self.pretrained_gen, self.target_samples, config=custom_config)
+        self.assertEqual(perturber.noise_dim, 4)
+        self.assertEqual(perturber.eval_batch_size, 200)
+
+    def test_perturb_basic(self):
+        """
+        Test perturb method with basic parameters.
+        """
+        perturber = WeightPerturberSection2(self.pretrained_gen, self.target_samples)
+        perturbed_gen = perturber.perturb(steps=5, eta_init=0.01, clip_norm=0.1, momentum=0.9, patience=3, verbose=False)
+        self.assertIsInstance(perturbed_gen, Generator)
+        
+        # Check if perturbation happened (parameters changed)
+        orig_params = parameters_to_vector(self.pretrained_gen.parameters())
+        pert_params = parameters_to_vector(perturbed_gen.parameters())
+        self.assertFalse(torch.allclose(orig_params, pert_params))
+        
+        # Check W2 improvement (loose check)
+        noise = torch.randn(200, self.noise_dim, device=self.device)
+        orig_out = self.pretrained_gen(noise).detach()
+        pert_out = perturbed_gen(noise).detach()
+        w2_orig = compute_wasserstein_distance(orig_out, self.target_samples)
+        w2_pert = compute_wasserstein_distance(pert_out, self.target_samples)
+        self.assertLess(w2_pert.item(), w2_orig.item() + 0.1)  # Allow small tolerance
+
+    def test_compute_delta_theta(self):
+        """
+        Test _compute_delta_theta internal method.
+        """
+        perturber = WeightPerturberSection2(self.pretrained_gen, self.target_samples)
+        grads = torch.randn(100, device=self.device)  # Fake grads
+        eta = 0.01
+        clip_norm = 0.1
+        momentum = 0.9
+        prev_delta = torch.zeros_like(grads)
+        
+        delta_theta = perturber._compute_delta_theta(grads, eta, clip_norm, momentum, prev_delta)
+        self.assertEqual(delta_theta.shape, grads.shape)
+        self.assertTrue(torch.all(torch.isfinite(delta_theta)))
+        
+        # Check clipping
+        large_grads = grads * 10
+        delta_large = perturber._compute_delta_theta(large_grads, eta, clip_norm, momentum, prev_delta)
+        self.assertLessEqual(delta_large.norm().item(), clip_norm * len(grads))
+
+    def test_validate_and_adapt(self):
+        """
+        Test _validate_and_adapt internal method.
+        """
+        perturber = WeightPerturberSection2(self.pretrained_gen, self.target_samples)
+        pert_gen = Generator(self.noise_dim, self.data_dim, self.hidden_dim).to(self.device)
+        pert_gen.load_state_dict(self.pretrained_gen.state_dict())
+        eta = 0.01
+        w2_hist = [1.0, 0.9]  # Fake history
+        patience = 3
+        verbose = False
+        step = 2
+        
+        w2_pert, improvement = perturber._validate_and_adapt(pert_gen, eta, w2_hist, patience, verbose, step)
+        self.assertIsInstance(w2_pert, float)
+        self.assertIsInstance(improvement, float)
+        self.assertGreaterEqual(improvement, -1.0)  # Loose check
+
+    def test_perturb_errors(self):
+        """
+        Test perturb method with invalid inputs.
+        """
+        perturber = WeightPerturberSection2(self.pretrained_gen, torch.empty(0, self.data_dim))
+        with self.assertRaises(ValueError):
+            perturber.perturb(steps=1)
+        
+        wrong_dim_targets = torch.randn(self.batch_size, 3, device=self.device)  # Dim mismatch
+        perturber = WeightPerturberSection2(self.pretrained_gen, wrong_dim_targets)
+        with self.assertRaises(ValueError):
+            perturber.perturb(steps=1)
+
+class TestWeightPerturberSection3(unittest.TestCase):
+    """
+    Unit tests for WeightPerturberSection3 class in perturbation.py.
+    
+    These tests cover initialization, perturbation process, internal methods,
+    output validity, and error handling.
+    """
+
+    def setUp(self):
+        """
+        Set up common parameters, models, and data for tests.
+        """
+        self.noise_dim = 2
+        self.data_dim = 2
+        self.hidden_dim = 64
+        self.device = torch.device('cpu')
+        self.num_domains = 2  # Smaller for tests
+        self.evidence_list, self.centers = sample_evidence_domains(
+            num_domains=self.num_domains, samples_per_domain=20, device=self.device
+        )
+        
+        # Pretrain a small generator
+        self.generator = Generator(self.noise_dim, self.data_dim, self.hidden_dim).to(self.device)
+        self.critic = Generator(self.data_dim, self.hidden_dim).to(self.device)
+        real_sampler = lambda bs: sample_real_data(bs, device=self.device)
+        self.pretrained_gen, _ = pretrain_wgan_gp(
+            self.generator, self.critic, real_sampler,
+            epochs=10, batch_size=32, noise_dim=self.noise_dim, device=self.device.str, verbose=False
+        )
+
+    def test_initialization(self):
+        """
+        Test WeightPerturberSection3 initialization.
+        """
+        perturber = WeightPerturberSection3(self.pretrained_gen, self.evidence_list, self.centers)
+        self.assertIsInstance(perturber.generator, Generator)
+        self.assertEqual(len(perturber.evidence_list), self.num_domains)
+        self.assertEqual(perturber.device, self.device)
+        self.assertIn('noise_dim', perturber.config)
+        self.assertIn('eval_batch_size', perturber.config)
+
+    def test_initialization_custom_config(self):
+        """
+        Test initialization with custom config.
+        """
+        custom_config = {'noise_dim': 4, 'eval_batch_size': 200}
+        perturber = WeightPerturberSection3(self.pretrained_gen, self.evidence_list, self.centers, config=custom_config)
+        self.assertEqual(perturber.noise_dim, 4)
+        self.assertEqual(perturber.eval_batch_size, 200)
+
+    def test_perturb_basic(self):
+        """
+        Test perturb method with basic parameters.
+        """
+        perturber = WeightPerturberSection3(self.pretrained_gen, self.evidence_list, self.centers)
+        perturbed_gen = perturber.perturb(epochs=5, eta_init=0.01, clip_norm=0.1, momentum=0.9, patience=3, lambda_entropy=0.01, verbose=False)
+        self.assertIsInstance(perturbed_gen, Generator)
+        
+        # Check if perturbation happened
+        orig_params = parameters_to_vector(self.pretrained_gen.parameters())
+        pert_params = parameters_to_vector(perturbed_gen.parameters())
+        self.assertFalse(torch.allclose(orig_params, pert_params))
+        
+        # Check OT loss improvement (loose check)
+        noise = torch.randn(200, self.noise_dim, device=self.device)
+        orig_out = self.pretrained_gen(noise).detach()
+        pert_out = perturbed_gen(noise).detach()
+        ot_orig = sum(compute_wasserstein_distance(orig_out, ev) for ev in self.evidence_list) / self.num_domains
+        ot_pert = sum(compute_wasserstein_distance(pert_out, ev) for ev in self.evidence_list) / self.num_domains
+        self.assertLess(ot_pert.item(), ot_orig.item() + 0.1)
+
+    def test_estimate_virtual_target(self):
+        """
+        Test _estimate_virtual_target internal method.
+        """
+        perturber = WeightPerturberSection3(self.pretrained_gen, self.evidence_list, self.centers)
+        epoch = 0
+        bandwidth_base = 0.22
+        virtuals = perturber._estimate_virtual_target(self.evidence_list, epoch, bandwidth_base)
+        self.assertEqual(virtuals.shape[1], self.data_dim)
+        self.assertGreaterEqual(virtuals.shape[0], 100)  # At least some samples
+        self.assertTrue(torch.all(torch.isfinite(virtuals)))
+
+    def test_compute_delta_theta(self):
+        """
+        Test _compute_delta_theta internal method.
+        """
+        perturber = WeightPerturberSection3(self.pretrained_gen, self.evidence_list, self.centers)
+        grads = torch.randn(100, device=self.device)
+        eta = 0.01
+        clip_norm = 0.1
+        momentum = 0.9
+        prev_delta = torch.zeros_like(grads)
+        
+        delta_theta = perturber._compute_delta_theta(grads, eta, clip_norm, momentum, prev_delta)
+        self.assertEqual(delta_theta.shape, grads.shape)
+        self.assertTrue(torch.all(torch.isfinite(delta_theta)))
+        
+        # Check clipping
+        large_grads = grads * 10
+        delta_large = perturber._compute_delta_theta(large_grads, eta, clip_norm, momentum, prev_delta)
+        self.assertLessEqual(delta_large.norm().item(), clip_norm * len(grads))
+
+    def test_validate_and_adapt(self):
+        """
+        Test _validate_and_adapt internal method.
+        """
+        perturber = WeightPerturberSection3(self.pretrained_gen, self.evidence_list, self.centers)
+        pert_gen = Generator(self.noise_dim, self.data_dim, self.hidden_dim).to(self.device)
+        pert_gen.load_state_dict(self.pretrained_gen.state_dict())
+        virtual_samples = torch.randn(100, self.data_dim, device=self.device)  # Fake
+        eta = 0.01
+        ot_hist = [1.0, 0.9]
+        patience = 3
+        verbose = False
+        epoch = 2
+        
+        ot_pert, improvement = perturber._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
+        self.assertIsInstance(ot_pert, float)
+        self.assertIsInstance(improvement, float)
+        self.assertGreaterEqual(improvement, -1.0)
+
+    def test_perturb_errors(self):
+        """
+        Test perturb method with invalid inputs.
+        """
+        with self.assertRaises(ValueError):
+            WeightPerturberSection3(self.pretrained_gen, [], [])  # Empty evidence
+        
+        wrong_dim_ev = [torch.randn(20, 3, device=self.device)]  # Dim mismatch
+        with self.assertRaises(ValueError):
+            perturber = WeightPerturberSection3(self.pretrained_gen, wrong_dim_ev, [np.array([0,0])])
+            perturber.perturb(epochs=1)
+
+if __name__ == '__main__':
+    unittest.main()
