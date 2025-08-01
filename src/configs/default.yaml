@@ -50,8 +50,8 @@ losses:
     blur: 0.06  # Entropic blur for Sinkhorn
     entropy_lambda: 0.012  # Coefficient for entropy regularization
 
-# Perturbation parameters for Section 2 (target-given)
-perturbation_section2:
+# Perturbation parameters for target-given
+perturbation_target_given:
   steps: 24  # Number of perturbation steps
   eta_init: 0.017  # Initial learning rate
   clip_norm: 0.12  # Gradient clipping norm (congestion bound)
@@ -59,8 +59,8 @@ perturbation_section2:
   patience: 7  # Patience for early stopping on W2 increase
   eval_batch_size: 1600  # Batch size for evaluation
 
-# Perturbation parameters for Section 3 (evidence-based)
-perturbation_section3:
+# Perturbation parameters for evidence-based (target not given)
+perturbation_target_not_given:
   epochs: 100  # Number of perturbation epochs
   eta_init: 0.045  # Initial learning rate
   clip_norm: 0.23  # Gradient clipping norm
@@ -96,3 +96,22 @@ experimental:
   entropy_regularization: true  # Enable entropy reg in losses
   max_retries: 3  # Max retries for failed operations (e.g., NaN losses)
   tolerance: 1e-5  # Numerical tolerance for comparisons
+
+# Backward compatibility - old section names
+perturbation_section2:
+  steps: 24
+  eta_init: 0.017
+  clip_norm: 0.12
+  momentum: 0.91
+  patience: 7
+  eval_batch_size: 1600
+
+perturbation_section3:
+  epochs: 100
+  eta_init: 0.045
+  clip_norm: 0.23
+  momentum: 0.975
+  patience: 6
+  lambda_entropy: 0.012
+  eval_batch_size: 600
+  bandwidth_base: 0.22

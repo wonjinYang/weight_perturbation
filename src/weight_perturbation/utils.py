@@ -166,14 +166,31 @@ def load_config(config_path: str = 'configs/default.yaml') -> Dict[str, Any]:
         >>> print(config['eta_init'])
         0.017
     """
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    # Try to find config file in different locations
+    possible_paths = [
+        config_path,
+        f'src/{config_path}',
+        f'./{config_path}',
+        os.path.join(os.path.dirname(__file__), '..', '..', config_path)
+    ]
     
-    with open(config_path, 'r') as f:
+    config_file = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            config_file = path
+            break
+    
+    if config_file is None:
+        raise FileNotFoundError(f"Config file not found. Tried paths: {possible_paths}")
+    
+    with open(config_file, 'r') as f:
         try:
             config = yaml.safe_load(f)
         except yaml.YAMLError as e:
-            raise yaml.YAMLError(f"Invalid YAML in {config_path}: {e}")
+            raise yaml.YAMLError(f"Invalid YAML in {config_file}: {e}")
+    
+    if config is None:
+        config = {}
     
     # Default values if not present (example defaults)
     defaults = {

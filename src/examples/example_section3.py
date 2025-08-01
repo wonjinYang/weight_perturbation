@@ -49,26 +49,28 @@ def main():
     # Load configuration with fallback to defaults
     try:
         config = load_config(args.config)
-    except:
-        print(f"Warning: Could not load config from {args.config}, using defaults")
+        # Merge with args
+        for key, value in vars(args).items():
+            if value is not None and key != 'config':
+                config[key] = value
+    except Exception as e:
+        print(f"Warning: Could not load config from {args.config}: {e}")
+        print("Using default configuration...")
         config = {
-            'seed': 42,
-            'noise_dim': 2,
-            'data_dim': 2,
-            'hidden_dim': 256,
-            'pretrain_epochs': 300,
-            'perturb_epochs': 100,
-            'batch_size': 64,
-            'eval_batch_size': 600,
-            'num_evidence_domains': 3,
-            'samples_per_domain': 35,
-            'random_shift': 3.4
+            'seed': args.seed,
+            'noise_dim': args.noise_dim,
+            'data_dim': args.data_dim,
+            'hidden_dim': args.hidden_dim,
+            'pretrain_epochs': args.pretrain_epochs,
+            'perturb_epochs': args.perturb_epochs,
+            'batch_size': args.batch_size,
+            'eval_batch_size': args.eval_batch_size,
+            'num_evidence_domains': args.num_evidence_domains,
+            'samples_per_domain': args.samples_per_domain,
+            'random_shift': args.random_shift,
+            'plot': args.plot,
+            'verbose': args.verbose
         }
-    
-    # Override config with command-line args
-    for key, value in vars(args).items():
-        if value is not None:
-            config[key] = value
     
     # Set seed and device
     set_seed(config["seed"])

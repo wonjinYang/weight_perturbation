@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
-from typing import Callable, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 def compute_gradient_penalty(
     critic: nn.Module,
@@ -124,12 +124,6 @@ def pretrain_wgan_gp(
     device = torch.device(device)
     generator.to(device)
     critic.to(device)
-
-    # Validate device consistency
-    if next(generator.parameters()).device != device:
-        raise ValueError("Generator must be on the specified device.")
-    if next(critic.parameters()).device != device:
-        raise ValueError("Critic must be on the specified device.")
 
     optim_g = optim.Adam(generator.parameters(), lr=lr, betas=betas)
     optim_d = optim.Adam(critic.parameters(), lr=lr, betas=betas)
