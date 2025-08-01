@@ -67,15 +67,37 @@ class WeightPerturber(ABC):
         Returns:
             Generator: A new Generator instance with copied weights.
         """
-        # Infer hidden_dim from the first layer
-        hidden_dim = self.generator.model[0].out_features
+        # Infer architecture from the original generator
+        # First layer: noise_dim -> hidden_dim
+        first_layer = None
+        for module in self.generator.modules():
+            if isinstance(module, nn.Linear):
+                first_layer = module
+                break
         
+        if first_layer is None:
+            raise ValueError("Could not find Linear layers in generator to infer architecture")
+        
+        hidden_dim = first_layer.out_features
+        
+        # Create new generator with same architecture
         pert_gen = Generator(
             noise_dim=self.noise_dim,
             data_dim=data_dim,
             hidden_dim=hidden_dim
         ).to(self.device)
-        pert_gen.load_state_dict(self.generator.state_dict())
+        
+        # Verify the new generator has parameters
+        param_count = sum(p.numel() for p in pert_gen.parameters())
+        if param_count == 0:
+            raise RuntimeError(f"Created generator has no parameters. Architecture: noise_dim={self.noise_dim}, data_dim={data_dim}, hidden_dim={hidden_dim}")
+        
+        # Copy state dict if architectures match
+        try:
+            pert_gen.load_state_dict(self.generator.state_dict())
+        except RuntimeError as e:
+            print(f"Warning: Could not copy weights due to architecture mismatch: {e}")
+            print("Using randomly initialized weights instead.")
         
         return pert_gen
     
@@ -247,6 +269,9 @@ class WeightPerturberTargetGiven(WeightPerturber):
         
         # Initialize perturbation state
         theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+        if theta_prev.numel() == 0:
+            raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
+        
         delta_theta_prev = torch.zeros_like(theta_prev)
         eta = eta_init
         w2_hist = []
@@ -393,6 +418,9 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
         
         # Initialize perturbation state
         theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+        if theta_prev.numel() == 0:
+            raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
+            
         delta_theta_prev = torch.zeros_like(theta_prev)
         eta = eta_init
         ot_hist = []

@@ -40,7 +40,9 @@ def sample_real_data(
     else:
         if len(means) == 0:
             raise ValueError("Means list cannot be empty.")
-        means = [torch.tensor(m, dtype=torch.float32) for m in means]
+        # Use detach().clone() to avoid warning
+        means = [torch.tensor(m, dtype=torch.float32).detach().clone() if isinstance(m, torch.Tensor) 
+                else torch.tensor(m, dtype=torch.float32) for m in means]
     
     num_clusters = len(means)
     data_dim = means[0].shape[0]
@@ -98,7 +100,9 @@ def sample_target_data(
     else:
         if len(means) == 0:
             raise ValueError("Means list cannot be empty.")
-        means = [torch.tensor(m, dtype=torch.float32) for m in means]
+        # Use detach().clone() to avoid warning  
+        means = [torch.tensor(m, dtype=torch.float32).detach().clone() if isinstance(m, torch.Tensor)
+                else torch.tensor(m, dtype=torch.float32) for m in means]
     
     if shift is None:
         shift = torch.tensor([1.8, 1.8], dtype=torch.float32)
