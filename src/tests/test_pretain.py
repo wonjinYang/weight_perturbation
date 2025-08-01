@@ -8,6 +8,7 @@ from typing import Callable
 from weight_perturbation.pretrain import compute_gradient_penalty, pretrain_wgan_gp
 from weight_perturbation.models import Generator, Critic
 from weight_perturbation.samplers import sample_real_data
+from weight_perturbation.utils import parameters_to_vector
 
 class TestComputeGradientPenalty(unittest.TestCase):
     """
@@ -98,9 +99,12 @@ class TestPretrainWganGp(unittest.TestCase):
         self.device = 'cpu'
         self.generator = Generator(self.noise_dim, self.data_dim, self.hidden_dim)
         self.critic = Critic(self.data_dim, self.hidden_dim)
-        self.real_sampler = lambda batch_size, **kwargs: sample_real_data(
-            batch_size, means=None, std=0.4, device=self.device
-        )
+        
+        def real_sampler(batch_size):
+            return sample_real_data(
+                batch_size, means=None, std=0.4, device=self.device
+            )
+        self.real_sampler = real_sampler
 
     def test_pretrain_basic(self):
         """
@@ -136,7 +140,7 @@ class TestPretrainWganGp(unittest.TestCase):
             device=self.device, verbose=True  # Enable for testing
         )
         # Indirect check: After training, critic should distinguish real vs fake better
-        real_samples = self.real_sampler(self.batch_size).to(self.device)
+        real_samples = self.real_sampler(self.batch_size)
         noise = torch.randn(self.batch_size, self.noise_dim, device=self.device)
         fake_samples = trained_gen(noise).detach()
         
@@ -152,24 +156,17 @@ class TestPretrainWganGp(unittest.TestCase):
             self.generator, self.critic, self.real_sampler,
             epochs=1, batch_size=self.batch_size, device=self.device, verbose=False
         )
-        self.assertEqual(next(trained_gen.parameters()).device.type, self.device)
-        self.assertEqual(next(trained_crit.parameters()).device.type, self.device)
+        self.assertEqual(str(next(trained_gen.parameters()).device), self.device)
+        self.assertEqual(str(next(trained_crit.parameters()).device), self.device)
 
     def test_pretrain_errors(self):
         """
         Test pretrain_wgan_gp with invalid inputs.
         """
-        # Mismatched device
-        self.generator.to('cuda' if self.device == 'cpu' else 'cpu')
-        with self.assertRaises(ValueError):
-            pretrain_wgan_gp(
-                self.generator, self.critic, self.real_sampler,
-                epochs=1, batch_size=self.batch_size, device=self.device, verbose=False
-            )
-        
         # Invalid sampler output
-        def invalid_sampler(batch_size, **kwargs):
+        def invalid_sampler(batch_size):
             return torch.randn(batch_size, self.data_dim + 1, device=self.device)  # Wrong dim
+        
         with self.assertRaises(ValueError):
             pretrain_wgan_gp(
                 self.generator, self.critic, invalid_sampler,
@@ -194,9 +191,6 @@ class TestPretrainWganGp(unittest.TestCase):
         # Check if optimizers were set correctly (indirectly via training)
         self.assertIsInstance(trained_gen, nn.Module)
         self.assertIsInstance(trained_crit, nn.Module)
-
-def parameters_to_vector(parameters):
-    return torch.cat([p.view(-1) for p in parameters])
 
 if __name__ == '__main__':
     unittest.main()

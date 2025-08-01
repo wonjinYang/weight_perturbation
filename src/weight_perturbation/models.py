@@ -13,9 +13,24 @@ class Generator(nn.Module):
         data_dim (int): Dimension of the output data.
         hidden_dim (int): Number of units in the hidden layers.
         activation (nn.Module, optional): Activation function to use. Defaults to nn.LeakyReLU(0.2).
+    
+    Raises:
+        ValueError: If dimensions are invalid (zero or negative).
     """
-    def __init__(self, noise_dim: int, data_dim: int, hidden_dim: int, activation=nn.LeakyReLU(0.2)):
+    def __init__(self, noise_dim: int, data_dim: int, hidden_dim: int, activation=None):
         super(Generator, self).__init__()
+        
+        # Validate dimensions
+        if noise_dim <= 0:
+            raise ValueError("noise_dim must be positive")
+        if data_dim <= 0:
+            raise ValueError("data_dim must be positive")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        
+        if activation is None:
+            activation = nn.LeakyReLU(0.2)
+        
         self.model = nn.Sequential(
             nn.Linear(noise_dim, hidden_dim),
             activation,
@@ -49,9 +64,22 @@ class Critic(nn.Module):
         data_dim (int): Dimension of the input data.
         hidden_dim (int): Number of units in the hidden layers.
         activation (nn.Module, optional): Activation function to use. Defaults to nn.LeakyReLU(0.2).
+    
+    Raises:
+        ValueError: If dimensions are invalid (zero or negative).
     """
-    def __init__(self, data_dim: int, hidden_dim: int, activation=nn.LeakyReLU(0.2)):
+    def __init__(self, data_dim: int, hidden_dim: int, activation=None):
         super(Critic, self).__init__()
+        
+        # Validate dimensions
+        if data_dim <= 0:
+            raise ValueError("data_dim must be positive")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        
+        if activation is None:
+            activation = nn.LeakyReLU(0.2)
+        
         self.model = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
             activation,

@@ -14,12 +14,13 @@ from weight_perturbation import (
     sample_real_data,
     sample_evidence_domains,
     pretrain_wgan_gp,
-    WeightPerturberSection3,
+    WeightPerturberTargetNotGiven,
     multi_marginal_ot_loss,
     plot_distributions,
     load_config,
     set_seed,
-    compute_device
+    compute_device,
+    virtual_target_sampler
 )
 
 # Parse command-line arguments for customization
@@ -45,9 +46,29 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Load configuration and override with args if provided
-    config = load_config(args.config)
-    config.update(vars(args))  # Override config with command-line args
+    # Load configuration with fallback to defaults
+    try:
+        config = load_config(args.config)
+    except:
+        print(f"Warning: Could not load config from {args.config}, using defaults")
+        config = {
+            'seed': 42,
+            'noise_dim': 2,
+            'data_dim': 2,
+            'hidden_dim': 256,
+            'pretrain_epochs': 300,
+            'perturb_epochs': 100,
+            'batch_size': 64,
+            'eval_batch_size': 600,
+            'num_evidence_domains': 3,
+            'samples_per_domain': 35,
+            'random_shift': 3.4
+        }
+    
+    # Override config with command-line args
+    for key, value in vars(args).items():
+        if value is not None:
+            config[key] = value
     
     # Set seed and device
     set_seed(config["seed"])
@@ -69,7 +90,7 @@ def main():
     ).to(device)
     
     # Define real data sampler (closure for compatibility)
-    def real_sampler(batch_size: int, **kwargs):
+    def real_sampler(batch_size: int):
         return sample_real_data(
             batch_size=batch_size,
             means=None,  # Default 4 clusters
@@ -105,7 +126,7 @@ def main():
     )
     
     # Initialize perturber
-    perturber = WeightPerturberSection3(
+    perturber = WeightPerturberTargetNotGiven(
         generator=pretrained_gen,
         evidence_list=evidence_list,
         centers=centers,
@@ -156,7 +177,6 @@ def main():
     # Optional plotting (using a final virtual target for visualization)
     if args.plot:
         # Sample a final virtual target for plotting
-        from weight_perturbation import virtual_target_sampler
         final_virtual = virtual_target_sampler(
             evidence_list,
             weights=None,

@@ -17,7 +17,14 @@ from .losses import (
     global_w2_loss_and_grad,
     multi_marginal_ot_loss
 )
-from .perturbation import WeightPerturberSection2, WeightPerturberSection3
+from .perturbation import (
+    WeightPerturber,
+    WeightPerturberTargetGiven,
+    WeightPerturberTargetNotGiven,
+    # Backward compatibility aliases
+    WeightPerturberSection2,
+    WeightPerturberSection3
+)
 from .pretrain import pretrain_wgan_gp
 from .utils import (
     parameters_to_vector,
@@ -47,7 +54,10 @@ __all__ = [
     'compute_wasserstein_distance', 'barycentric_ot_map',
     'global_w2_loss_and_grad', 'multi_marginal_ot_loss',
     
-    # Perturbation
+    # Perturbation (new names)
+    'WeightPerturber', 'WeightPerturberTargetGiven', 'WeightPerturberTargetNotGiven',
+    
+    # Perturbation (backward compatibility)
     'WeightPerturberSection2', 'WeightPerturberSection3',
     
     # Pretrain
@@ -64,22 +74,23 @@ Weight Perturbation Library
 
 This library implements the Weight Perturbation strategy for neural networks,
 focusing on congested transport formulations for distribution alignment.
-It supports both target-given (Section 2) and evidence-based (Section 3) perturbations.
+It supports both target-given and evidence-based (target-not-given) perturbations.
 
 Key Features:
 - Modular design with separate modules for models, samplers, losses, perturbation, pretraining, and utilities.
+- Inheritance-based perturbation classes with shared functionality.
 - PyTorch-based implementation.
 - Configurable via YAML files.
 - Examples and tests included.
 
 Usage Example:
-    from weight_perturbation import Generator, pretrain_wgan_gp, WeightPerturberSection2
+    from weight_perturbation import Generator, pretrain_wgan_gp, WeightPerturberTargetGiven
     
     # Pretrain a generator
     generator, critic = pretrain_wgan_gp(...)
     
-    # Perturb for Section 2
-    perturber = WeightPerturberSection2(generator, target_samples)
+    # Perturb for target-given case
+    perturber = WeightPerturberTargetGiven(generator, target_samples)
     perturbed_gen = perturber.perturb()
 
 For more details, see README.md or the examples directory.

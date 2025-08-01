@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from geomloss import SamplesLoss
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Tuple
 
 def compute_wasserstein_distance(
     samples1: torch.Tensor,
@@ -98,7 +98,7 @@ def global_w2_loss_and_grad(
     target_samples: torch.Tensor,
     noise_samples: torch.Tensor,
     map_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = barycentric_ot_map
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the global W2 loss and gradients for Section 2 perturbation.
     
@@ -113,7 +113,7 @@ def global_w2_loss_and_grad(
         map_fn (Callable): Function to compute OT map (defaults to barycentric_ot_map).
     
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: (loss scalar, flattened gradients tensor).
+        Tuple[torch.Tensor, torch.Tensor]: (loss scalar, flattened gradients tensor).
     
     Raises:
         ValueError: If shapes are incompatible or generator output mismatches target dim.

@@ -14,7 +14,7 @@ from weight_perturbation import (
     sample_real_data,
     sample_target_data,
     pretrain_wgan_gp,
-    WeightPerturberSection2,
+    WeightPerturberTargetGiven,
     compute_wasserstein_distance,
     plot_distributions,
     load_config,
@@ -42,9 +42,26 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Load configuration and override with args if provided
-    config = load_config(args.config)
-    config.update(vars(args))  # Override config with command-line args
+    # Load configuration with fallback to defaults
+    try:
+        config = load_config(args.config)
+    except:
+        print(f"Warning: Could not load config from {args.config}, using defaults")
+        config = {
+            'seed': 42,
+            'noise_dim': 2,
+            'data_dim': 2,
+            'hidden_dim': 256,
+            'pretrain_epochs': 300,
+            'perturb_steps': 24,
+            'batch_size': 64,
+            'eval_batch_size': 1600
+        }
+    
+    # Override config with command-line args
+    for key, value in vars(args).items():
+        if value is not None:
+            config[key] = value
     
     # Set seed and device
     set_seed(config["seed"])
@@ -66,7 +83,7 @@ def main():
     ).to(device)
     
     # Define real data sampler (closure for compatibility)
-    def real_sampler(batch_size: int, **kwargs):
+    def real_sampler(batch_size: int):
         return sample_real_data(
             batch_size=batch_size,
             means=None,  # Default 4 clusters
@@ -102,7 +119,7 @@ def main():
     )
     
     # Initialize perturber
-    perturber = WeightPerturberSection2(
+    perturber = WeightPerturberTargetGiven(
         generator=pretrained_gen,
         target_samples=target_samples,
         config=config

@@ -1,12 +1,12 @@
 import torch
 import numpy as np
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 def sample_real_data(
     batch_size: int,
     means: Optional[List[Union[list, tuple, np.ndarray, torch.Tensor]]] = None,
     std: float = 0.4,
-    device: str = 'cpu'
+    device: Union[str, torch.device] = 'cpu'
 ) -> torch.Tensor:
     """
     Sample from a real data distribution, such as multiple Gaussian clusters.
@@ -19,7 +19,7 @@ def sample_real_data(
         means (Optional[List[Union[list, tuple, np.ndarray, torch.Tensor]]]): List of mean vectors for each cluster.
             If None, use default 2D means: [[2,0], [-2,0], [0,2], [0,-2]].
         std (float): Standard deviation for each Gaussian cluster. Defaults to 0.4.
-        device (str): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
+        device (Union[str, torch.device]): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
     
     Returns:
         torch.Tensor: Generated samples of shape (batch_size, data_dim).
@@ -32,10 +32,14 @@ def sample_real_data(
         >>> samples.shape
         torch.Size([100, 2])
     """
+    device = torch.device(device)
+    
     if means is None:
         means = [torch.tensor([2.0, 0.0]), torch.tensor([-2.0, 0.0]),
                  torch.tensor([0.0, 2.0]), torch.tensor([0.0, -2.0])]
     else:
+        if len(means) == 0:
+            raise ValueError("Means list cannot be empty.")
         means = [torch.tensor(m, dtype=torch.float32) for m in means]
     
     num_clusters = len(means)
@@ -59,7 +63,7 @@ def sample_target_data(
     shift: Optional[Union[list, tuple, np.ndarray, torch.Tensor]] = None,
     means: Optional[List[Union[list, tuple, np.ndarray, torch.Tensor]]] = None,
     std: float = 0.4,
-    device: str = 'cpu'
+    device: Union[str, torch.device] = 'cpu'
 ) -> torch.Tensor:
     """
     Sample from a target distribution, which is a shifted version of the real data clusters.
@@ -73,7 +77,7 @@ def sample_target_data(
         means (Optional[List[Union[list, tuple, np.ndarray, torch.Tensor]]]): Base means before shifting.
             If None, use default real data means.
         std (float): Standard deviation for each Gaussian cluster. Defaults to 0.4.
-        device (str): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
+        device (Union[str, torch.device]): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
     
     Returns:
         torch.Tensor: Generated target samples of shape (batch_size, data_dim).
@@ -86,10 +90,14 @@ def sample_target_data(
         >>> target_samples.shape
         torch.Size([100, 2])
     """
+    device = torch.device(device)
+    
     if means is None:
         means = [torch.tensor([2.0, 0.0]), torch.tensor([-2.0, 0.0]),
                  torch.tensor([0.0, 2.0]), torch.tensor([0.0, -2.0])]
     else:
+        if len(means) == 0:
+            raise ValueError("Means list cannot be empty.")
         means = [torch.tensor(m, dtype=torch.float32) for m in means]
     
     if shift is None:
@@ -110,8 +118,8 @@ def sample_evidence_domains(
     samples_per_domain: int = 35,
     random_shift: float = 3.4,
     std: float = 0.7,
-    device: str = 'cpu'
-) -> tuple[List[torch.Tensor], List[np.ndarray]]:
+    device: Union[str, torch.device] = 'cpu'
+) -> Tuple[List[torch.Tensor], List[np.ndarray]]:
     """
     Sample multiple evidence domains arranged in a circular pattern.
     
@@ -122,16 +130,25 @@ def sample_evidence_domains(
         samples_per_domain (int): Number of samples per domain. Defaults to 35.
         random_shift (float): Radius of the circular placement. Defaults to 3.4.
         std (float): Standard deviation for sampling around each center. Defaults to 0.7.
-        device (str): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
+        device (Union[str, torch.device]): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
     
     Returns:
-        tuple[List[torch.Tensor], List[np.ndarray]]: List of domain samples (tensors) and list of centers (numpy arrays).
+        Tuple[List[torch.Tensor], List[np.ndarray]]: List of domain samples (tensors) and list of centers (numpy arrays).
+    
+    Raises:
+        ValueError: If num_domains or samples_per_domain are invalid.
     
     Example:
         >>> domains, centers = sample_evidence_domains(3, 35)
         >>> len(domains)
         3
     """
+    if num_domains <= 0:
+        raise ValueError("num_domains must be positive.")
+    if samples_per_domain <= 0:
+        raise ValueError("samples_per_domain must be positive.")
+    
+    device = torch.device(device)
     centers = []
     samples = []
     angles = np.linspace(0, 2 * np.pi, num_domains, endpoint=False)
@@ -150,7 +167,7 @@ def kde_sampler(
     bandwidth: float = 0.22,
     num_samples: int = 160,
     adaptive: bool = False,
-    device: str = 'cpu'
+    device: Union[str, torch.device] = 'cpu'
 ) -> torch.Tensor:
     """
     Kernel Density Estimation (KDE) sampler using Gaussian kernels.
@@ -163,13 +180,13 @@ def kde_sampler(
         bandwidth (float): Bandwidth for Gaussian kernel. Defaults to 0.22.
         num_samples (int): Number of samples to generate. Defaults to 160.
         adaptive (bool): If True, adapt bandwidth based on local variance. Defaults to False.
-        device (str): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
+        device (Union[str, torch.device]): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
     
     Returns:
         torch.Tensor: Generated samples of shape (num_samples, data_dim).
     
     Raises:
-        ValueError: If evidence is empty or dimension mismatch.
+        ValueError: If evidence is empty or num_samples is invalid.
     
     Example:
         >>> evidence = torch.randn(50, 2)
@@ -179,6 +196,11 @@ def kde_sampler(
     """
     if evidence.numel() == 0:
         raise ValueError("Evidence tensor must not be empty.")
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive.")
+    
+    device = torch.device(device)
+    evidence = evidence.to(device)
     
     n_points, data_dim = evidence.shape
     idx = torch.randint(0, n_points, (num_samples,), device=device)
@@ -198,7 +220,7 @@ def virtual_target_sampler(
     bandwidth: float = 0.22,
     num_samples: int = 600,
     temperature: float = 1.0,
-    device: str = 'cpu'
+    device: Union[str, torch.device] = 'cpu'
 ) -> torch.Tensor:
     """
     Estimate a virtual target distribution via broadened KDE from multiple evidence domains.
@@ -211,7 +233,7 @@ def virtual_target_sampler(
         bandwidth (float): Bandwidth for KDE sampling. Defaults to 0.22.
         num_samples (int): Total number of virtual samples to generate. Defaults to 600.
         temperature (float): Temperature for softmax-based domain selection. Defaults to 1.0.
-        device (str): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
+        device (Union[str, torch.device]): Device to generate tensors on ('cpu' or 'cuda'). Defaults to 'cpu'.
     
     Returns:
         torch.Tensor: Virtual target samples of shape (num_samples, data_dim).
@@ -228,6 +250,10 @@ def virtual_target_sampler(
     num_domains = len(evidence_list)
     if num_domains == 0:
         raise ValueError("Evidence list must not be empty.")
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive.")
+    
+    device = torch.device(device)
     
     if weights is None:
         weights = [1.0 / num_domains] * num_domains
@@ -246,6 +272,10 @@ def virtual_target_sampler(
         if n > 0:
             domain_samples = kde_sampler(evidence_list[i], bandwidth=bandwidth, num_samples=n, device=device)
             res.append(domain_samples)
+    
+    if not res:  # Empty result case
+        # Fallback: sample uniformly from the first domain
+        res.append(kde_sampler(evidence_list[0], bandwidth=bandwidth, num_samples=num_samples, device=device))
     
     virtuals = torch.cat(res, dim=0)
     return virtuals
