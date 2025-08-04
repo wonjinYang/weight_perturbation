@@ -35,6 +35,10 @@ def parse_args():
     parser.add_argument("--noise_dim", type=int, default=2, help="Dimension of noise input")
     parser.add_argument("--data_dim", type=int, default=2, help="Dimension of data output")
     parser.add_argument("--hidden_dim", type=int, default=256, help="Hidden dimension for models")
+    parser.add_argument("--eta_init", type=float, default=0.025, help="Initial learning rate")
+    parser.add_argument("--clip_norm", type=float, default=0.12, help="Gradient clipping norm")
+    parser.add_argument("--momentum", type=float, default=0.91, help="Momentum factor")
+    parser.add_argument("--patience", type=int, default=7, help="Patience for early stopping")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of distributions")
     parser.add_argument("--verbose", action="store_true", help="Print verbose output during training")
     return parser.parse_args()
@@ -61,9 +65,29 @@ def main():
             'perturb_steps': args.perturb_steps,
             'batch_size': args.batch_size,
             'eval_batch_size': args.eval_batch_size,
+            'eta_init': args.eta_init,
+            'clip_norm': args.clip_norm,
+            'momentum': args.momentum,
+            'patience': args.patience,
             'plot': args.plot,
             'verbose': args.verbose
         }
+    
+    # Adaptive learning rate configuration for target-given perturbation
+    perturbation_config = {
+        'noise_dim': config['noise_dim'],
+        'eval_batch_size': config['eval_batch_size'],
+        'eta_init': config['eta_init'],
+        'eta_min': 1e-5,
+        'eta_max': 0.1,
+        'eta_decay_factor': 0.8,
+        'eta_boost_factor': 1.05,
+        'clip_norm': config['clip_norm'],
+        'momentum': config['momentum'],
+        'patience': config['patience'],
+        'rollback_patience': 3,
+        'improvement_threshold': 1e-4,
+    }
     
     # Set seed and device
     set_seed(config["seed"])
@@ -120,21 +144,21 @@ def main():
         device=device
     )
     
-    # Initialize perturber
+    # Initialize perturber with adaptive learning rate configuration
     perturber = WeightPerturberTargetGiven(
         generator=pretrained_gen,
         target_samples=target_samples,
-        config=config
+        config=perturbation_config
     )
     
-    # Perform perturbation
-    print("Starting perturbation...")
+    # Perform perturbation with adaptive learning rate and rollback
+    print("Starting perturbation with adaptive learning rate...")
     perturbed_gen = perturber.perturb(
         steps=config["perturb_steps"],
-        eta_init=0.017,
-        clip_norm=0.12,
-        momentum=0.91,
-        patience=7,
+        eta_init=config["eta_init"],
+        clip_norm=config["clip_norm"],
+        momentum=config["momentum"],
+        patience=config["patience"],
         verbose=config["verbose"]
     )
     print("Perturbation completed.")
@@ -149,9 +173,13 @@ def main():
     w2_original = compute_wasserstein_distance(original_samples, target_samples, p=2, blur=0.07)
     w2_perturbed = compute_wasserstein_distance(perturbed_samples, target_samples, p=2, blur=0.07)
     
+    print("\n" + "="*50)
+    print("FINAL RESULTS")
+    print("="*50)
     print(f"W2 Distance (Original to Target): {w2_original.item():.4f}")
     print(f"W2 Distance (Perturbed to Target): {w2_perturbed.item():.4f}")
     print(f"Improvement: {((w2_original - w2_perturbed) / w2_original).item():.4f}")
+    print("="*50)
     
     # Optional plotting
     if args.plot:

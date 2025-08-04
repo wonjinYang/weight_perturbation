@@ -48,9 +48,15 @@ class WeightPerturber(ABC):
             'noise_dim': 2,
             'eval_batch_size': 1600,
             'eta_init': 0.017,
+            'eta_min': 1e-5,  # 최소 학습률
+            'eta_max': 0.1,   # 최대 학습률
+            'eta_decay_factor': 0.8,  # 성능 악화시 decay factor
+            'eta_boost_factor': 1.2,  # 성능 개선시 boost factor
             'clip_norm': 0.12,
             'momentum': 0.91,
-            'patience': 7
+            'patience': 7,
+            'rollback_patience': 3,  # rollback을 위한 patience
+            'improvement_threshold': 1e-4,  # 개선으로 간주하는 최소 임계값
         }
     
     def _initialize_common_params(self) -> None:
@@ -68,7 +74,6 @@ class WeightPerturber(ABC):
             Generator: A new Generator instance with copied weights.
         """
         # Infer architecture from the original generator
-        # First layer: noise_dim -> hidden_dim
         first_layer = None
         for module in self.generator.modules():
             if isinstance(module, nn.Linear):
@@ -149,22 +154,66 @@ class WeightPerturber(ABC):
         vector_to_parameters(theta_new, pert_gen.parameters())
         return theta_new
     
-    def _check_early_stopping(self, loss_hist: List[float], patience: int) -> bool:
+    def _adapt_learning_rate(self, eta: float, improvement: float, step: int, 
+                           no_improvement_count: int) -> Tuple[float, int]:
         """
-        Check if early stopping criteria are met.
+        Adapt learning rate based on improvement and step count.
+        
+        Args:
+            eta (float): Current learning rate.
+            improvement (float): Current improvement value.
+            step (int): Current step/epoch.
+            no_improvement_count (int): Consecutive steps without improvement.
+            
+        Returns:
+            Tuple[float, int]: (new_eta, updated_no_improvement_count)
+        """
+        eta_min = self.config.get('eta_min', 1e-5)
+        eta_max = self.config.get('eta_max', 0.1)
+        eta_decay_factor = self.config.get('eta_decay_factor', 0.8)
+        eta_boost_factor = self.config.get('eta_boost_factor', 1.05)
+        improvement_threshold = self.config.get('improvement_threshold', 1e-4)
+        
+        if improvement > improvement_threshold:
+            # Significant improvement: boost learning rate slightly
+            new_eta = min(eta * eta_boost_factor, eta_max)
+            new_no_improvement_count = 0
+        elif improvement < -improvement_threshold:
+            # Performance degradation: decay learning rate
+            new_eta = max(eta * eta_decay_factor, eta_min)
+            new_no_improvement_count = no_improvement_count + 1
+        else:
+            # Marginal change: slight decay to maintain stability
+            new_eta = max(eta * 0.99, eta_min)
+            new_no_improvement_count = no_improvement_count + 1
+            
+        return new_eta, new_no_improvement_count
+    
+    def _check_rollback_condition(self, loss_hist: List[float], 
+                                 no_improvement_count: int) -> bool:
+        """
+        Check if rollback to best state should be triggered.
         
         Args:
             loss_hist (List[float]): History of loss values.
-            patience (int): Patience for early stopping.
+            no_improvement_count (int): Consecutive steps without improvement.
             
         Returns:
-            bool: True if early stopping should be triggered.
+            bool: True if rollback should be triggered.
         """
-        if len(loss_hist) <= patience:
-            return False
+        rollback_patience = self.config.get('rollback_patience', 3)
         
-        # Check if loss has been increasing for 'patience' consecutive steps
-        return all(loss_hist[-i-1] >= loss_hist[-i-2] for i in range(1, patience))
+        # Trigger rollback if no improvement for several consecutive steps
+        if no_improvement_count >= rollback_patience:
+            return True
+            
+        # Also check if loss has been consistently increasing
+        if len(loss_hist) >= rollback_patience:
+            recent_losses = loss_hist[-rollback_patience:]
+            if all(recent_losses[i] >= recent_losses[i-1] for i in range(1, len(recent_losses))):
+                return True
+                
+        return False
     
     def _update_best_state(self, current_loss: float, pert_gen: Generator,
                           best_loss: float, best_vec: Optional[torch.Tensor]) -> Tuple[float, torch.Tensor]:
@@ -232,7 +281,7 @@ class WeightPerturberTargetGiven(WeightPerturber):
     
     This class performs weight perturbation on a pre-trained generator to align its output
     distribution with a given target distribution. It uses congested transport principles
-    with gradient clipping, momentum, adaptive learning rate, and early stopping/rollback
+    with gradient clipping, momentum, adaptive learning rate, and rollback mechanism
     for stability.
     
     Args:
@@ -252,41 +301,35 @@ class WeightPerturberTargetGiven(WeightPerturber):
     def perturb(self, steps: int = 24, eta_init: float = 0.017, clip_norm: float = 0.12,
                 momentum: float = 0.91, patience: int = 7, verbose: bool = True) -> Generator:
         """
-        Perform the perturbation process.
+        Perform the perturbation process with adaptive learning rate and rollback.
         
         Args:
             steps (int): Number of perturbation steps. Defaults to 24.
             eta_init (float): Initial learning rate. Defaults to 0.017.
             clip_norm (float): Gradient clipping norm (congestion bound). Defaults to 0.12.
             momentum (float): Momentum factor for updates. Defaults to 0.91.
-            patience (int): Patience for early stopping if W2 increases continuously. Defaults to 7.
+            patience (int): Maximum patience before stopping. Defaults to 7.
             verbose (bool): If True, print progress. Defaults to True.
         
         Returns:
             Generator: Perturbed generator model.
-        
-        Example:
-            >>> perturber = WeightPerturberTargetGiven(generator, target_samples)
-            >>> perturbed_gen = perturber.perturb(steps=20)
         """
         try:
             data_dim = self.target_samples.shape[1]
             pert_gen = self._create_generator_copy(data_dim)
             
-            print(f"New generator parameter count: {sum(p.numel() for p in pert_gen.parameters())}")
-            
-            # Initialize perturbation state with better error handling
+            # Initialize perturbation state
             theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
-            print(f"Creating parameter vector for generator with {theta_prev.numel()} parameters")
             
             if theta_prev.numel() == 0:
-                raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
+                raise RuntimeError("Generated generator has no parameters.")
             
             delta_theta_prev = torch.zeros_like(theta_prev)
             eta = eta_init
             w2_hist = []
             best_vec = None
             best_w2 = float('inf')
+            no_improvement_count = 0
             
             for step in range(steps):
                 try:
@@ -300,20 +343,34 @@ class WeightPerturberTargetGiven(WeightPerturber):
                     theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
                     delta_theta_prev = delta_theta.clone()
                     
-                    # Validate and adapt
+                    # Validate and get improvement
                     w2_pert, improvement = self._validate_and_adapt(pert_gen, eta, w2_hist, patience, verbose, step)
                     
                     # Update best state
                     best_w2, best_vec = self._update_best_state(w2_pert, pert_gen, best_w2, best_vec)
                     
-                    # Check early stopping
-                    if self._check_early_stopping(w2_hist, patience):
+                    # Adapt learning rate based on improvement
+                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, step, no_improvement_count)
+                    
+                    # Check for rollback condition
+                    if self._check_rollback_condition(w2_hist, no_improvement_count):
                         if verbose:
-                            print(f"Early stop/rollback at step {step} due to continuous W2 increase.")
-                        break
+                            print(f"Rollback triggered at step {step} (no improvement for {no_improvement_count} steps)")
+                        self._restore_best_state(pert_gen, best_vec)
+                        # Reset eta and counters after rollback
+                        eta = eta_init * 0.5  # Start with reduced learning rate
+                        no_improvement_count = 0
+                        # Reset momentum
+                        delta_theta_prev = torch.zeros_like(delta_theta_prev)
                     
                     if verbose:
                         print(f"[{step:2d}] W2(Pert, Target)={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+                    
+                    # Early stopping if patience exceeded
+                    if no_improvement_count >= patience:
+                        if verbose:
+                            print(f"Early stopping at step {step} due to lack of improvement")
+                        break
                 
                 except Exception as e:
                     print(f"Error in perturbation step {step}: {e}")
@@ -321,7 +378,7 @@ class WeightPerturberTargetGiven(WeightPerturber):
                         raise
                     break
             
-            # Restore best state
+            # Final restore to best state
             self._restore_best_state(pert_gen, best_vec)
             
             return pert_gen
@@ -347,7 +404,7 @@ class WeightPerturberTargetGiven(WeightPerturber):
     def _validate_and_adapt(self, pert_gen: Generator, eta: float, w2_hist: List[float],
                             patience: int, verbose: bool, step: int) -> Tuple[float, float]:
         """
-        Validate perturbation, adapt eta, and check for rollback.
+        Validate perturbation and compute improvement.
         
         Args:
             pert_gen (Generator): Current perturbed generator.
@@ -368,13 +425,12 @@ class WeightPerturberTargetGiven(WeightPerturber):
         
         w2_orig = compute_wasserstein_distance(orig_out, self.target_samples)
         w2_pert = compute_wasserstein_distance(pert_out, self.target_samples)
-        improvement = w2_orig - w2_pert
+        
+        # Compute improvement compared to original
+        improvement = w2_orig.item() - w2_pert.item()
         w2_hist.append(w2_pert.item())
         
-        if step > 1 and improvement < 0:
-            eta *= 0.54  # Reduce eta on degradation
-        
-        return w2_pert.item(), improvement.item()
+        return w2_pert.item(), improvement
 
 class WeightPerturberTargetNotGiven(WeightPerturber):
     """
@@ -408,52 +464,52 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
             'noise_dim': 2,
             'eval_batch_size': 600,
             'eta_init': 0.045,
+            'eta_min': 1e-4,
+            'eta_max': 0.2,
+            'eta_decay_factor': 0.75,
+            'eta_boost_factor': 1.1,
             'clip_norm': 0.23,
             'momentum': 0.975,
             'patience': 6,
-            'lambda_entropy': 0.012
+            'rollback_patience': 4,
+            'lambda_entropy': 0.012,
+            'improvement_threshold': 1e-3,
         }
     
     def perturb(self, epochs: int = 100, eta_init: float = 0.045, clip_norm: float = 0.23,
                 momentum: float = 0.975, patience: int = 6, lambda_entropy: float = 0.012,
                 verbose: bool = True) -> Generator:
         """
-        Perform the perturbation process for evidence-based case.
+        Perform the perturbation process for evidence-based case with adaptive learning rate and rollback.
         
         Args:
             epochs (int): Number of perturbation epochs. Defaults to 100.
             eta_init (float): Initial learning rate. Defaults to 0.045.
             clip_norm (float): Gradient clipping norm. Defaults to 0.23.
             momentum (float): Momentum factor. Defaults to 0.975.
-            patience (int): Patience for early stopping. Defaults to 6.
+            patience (int): Maximum patience before stopping. Defaults to 6.
             lambda_entropy (float): Entropy regularization coefficient. Defaults to 0.012.
             verbose (bool): If True, print progress. Defaults to True.
         
         Returns:
             Generator: Perturbed generator model.
-        
-        Example:
-            >>> perturber = WeightPerturberTargetNotGiven(generator, evidence_list, centers)
-            >>> perturbed_gen = perturber.perturb(epochs=50)
         """
         try:
             data_dim = self.evidence_list[0].shape[1]
             pert_gen = self._create_generator_copy(data_dim)
             
-            print(f"New generator parameter count: {sum(p.numel() for p in pert_gen.parameters())}")
-            
-            # Initialize perturbation state with better error handling
+            # Initialize perturbation state
             theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
-            print(f"Creating parameter vector for generator with {theta_prev.numel()} parameters")
             
             if theta_prev.numel() == 0:
-                raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
+                raise RuntimeError("Generated generator has no parameters.")
                 
             delta_theta_prev = torch.zeros_like(theta_prev)
             eta = eta_init
             ot_hist = []
             best_vec = None
             best_ot = float('inf')
+            no_improvement_count = 0
             
             for epoch in range(epochs):
                 try:
@@ -470,20 +526,34 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
                     theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
                     delta_theta_prev = delta_theta.clone()
                     
-                    # Validate and adapt
+                    # Validate and get improvement
                     ot_pert, improvement = self._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
                     
                     # Update best state
                     best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
                     
-                    # Check early stopping
-                    if self._check_early_stopping(ot_hist, patience):
+                    # Adapt learning rate based on improvement
+                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, epoch, no_improvement_count)
+                    
+                    # Check for rollback condition
+                    if self._check_rollback_condition(ot_hist, no_improvement_count):
                         if verbose:
-                            print(f"Early stop/rollback at epoch {epoch} due to continuous OT loss increase.")
-                        break
+                            print(f"Rollback triggered at epoch {epoch} (no improvement for {no_improvement_count} epochs)")
+                        self._restore_best_state(pert_gen, best_vec)
+                        # Reset eta and counters after rollback
+                        eta = eta_init * 0.6  # Start with reduced learning rate
+                        no_improvement_count = 0
+                        # Reset momentum
+                        delta_theta_prev = torch.zeros_like(delta_theta_prev)
                     
                     if verbose:
-                        print(f"[{epoch:2d}] OT(Pert, Virtual)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+                        print(f"[{epoch:2d}] OT(Pert, Evidence)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+                    
+                    # Early stopping if patience exceeded
+                    if no_improvement_count >= patience:
+                        if verbose:
+                            print(f"Early stopping at epoch {epoch} due to lack of improvement")
+                        break
                         
                 except Exception as e:
                     print(f"Error in perturbation epoch {epoch}: {e}")
@@ -491,7 +561,7 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
                         raise
                     break
             
-            # Restore best state
+            # Final restore to best state
             self._restore_best_state(pert_gen, best_vec)
             
             return pert_gen
@@ -544,7 +614,7 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
     def _validate_and_adapt(self, pert_gen: Generator, virtual_samples: torch.Tensor, eta: float,
                             ot_hist: List[float], patience: int, verbose: bool, epoch: int) -> Tuple[float, float]:
         """
-        Validate perturbation, adapt eta, and check for rollback in multi-marginal case.
+        Validate perturbation and compute improvement in multi-marginal case.
         
         Args:
             pert_gen (Generator): Current perturbed generator.
@@ -566,11 +636,10 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
         
         ot_orig = multi_marginal_ot_loss(orig_out, self.evidence_list).item()
         ot_pert = multi_marginal_ot_loss(pert_out, self.evidence_list).item()
+        
+        # Compute improvement compared to original (lower is better for OT loss)
         improvement = ot_orig - ot_pert
         ot_hist.append(ot_pert)
-        
-        if epoch > 1 and improvement < 0:
-            eta *= 0.72  # Reduce eta on degradation
         
         return ot_pert, improvement
 

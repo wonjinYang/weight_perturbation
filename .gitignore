@@ -3,5 +3,8 @@ toy_test/
 src/weight_perturbation.egg-info/
 __pycache__/
 test_perturbation.sh
+conftest.py
+debug_generatory.py
+log.log
 *.pyc
 *.pyo

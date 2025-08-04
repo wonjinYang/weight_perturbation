@@ -50,23 +50,35 @@ losses:
     blur: 0.06  # Entropic blur for Sinkhorn
     entropy_lambda: 0.012  # Coefficient for entropy regularization
 
-# Perturbation parameters for target-given
+# Perturbation parameters for target-given (improved)
 perturbation_target_given:
   steps: 24  # Number of perturbation steps
-  eta_init: 0.017  # Initial learning rate
+  eta_init: 0.025  # Initial learning rate (increased for faster convergence)
+  eta_min: 1e-5  # Minimum learning rate
+  eta_max: 0.1  # Maximum learning rate
+  eta_decay_factor: 0.8  # Learning rate decay when performance degrades
+  eta_boost_factor: 1.05  # Learning rate boost when performance improves
   clip_norm: 0.12  # Gradient clipping norm (congestion bound)
   momentum: 0.91  # Momentum factor for updates
-  patience: 7  # Patience for early stopping on W2 increase
+  patience: 7  # Patience for early stopping
+  rollback_patience: 3  # Patience for rollback mechanism
+  improvement_threshold: 1e-4  # Minimum improvement to be considered significant
   eval_batch_size: 1600  # Batch size for evaluation
 
-# Perturbation parameters for evidence-based (target not given)
+# Perturbation parameters for evidence-based (improved)
 perturbation_target_not_given:
   epochs: 100  # Number of perturbation epochs
-  eta_init: 0.045  # Initial learning rate
+  eta_init: 0.05  # Initial learning rate (increased for faster convergence)
+  eta_min: 1e-4  # Minimum learning rate
+  eta_max: 0.2  # Maximum learning rate
+  eta_decay_factor: 0.75  # Learning rate decay when performance degrades
+  eta_boost_factor: 1.1  # Learning rate boost when performance improves
   clip_norm: 0.23  # Gradient clipping norm
   momentum: 0.975  # Momentum factor
   patience: 6  # Patience for early stopping
+  rollback_patience: 4  # Patience for rollback mechanism
   lambda_entropy: 0.012  # Entropy regularization coefficient
+  improvement_threshold: 1e-3  # Minimum improvement to be considered significant
   eval_batch_size: 600  # Batch size for evaluation and virtual sampling
   bandwidth_base: 0.22  # Base bandwidth for virtual target estimation
 
@@ -78,40 +90,3 @@ pretrain:
   betas: [0.0, 0.9]  # Beta parameters for Adam
   gp_lambda: 10.0  # Gradient penalty coefficient
   critic_iters: 5  # Critic updates per generator update
-  eval_batch_size: 1000  # Batch size for evaluation during pretraining
-
-# Utility parameters
-utils:
-  plot:
-    title: "Distribution Comparison"  # Default plot title
-    save_path: null  # Default save path (null to disable saving)
-    show: false  # Whether to display plots
-  logging:
-    level: 'INFO'  # Logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
-    file: 'experiment.log'  # Log file name
-
-# Advanced/Experimental parameters
-experimental:
-  adaptive_bandwidth: true  # Enable adaptive bandwidth in KDE
-  entropy_regularization: true  # Enable entropy reg in losses
-  max_retries: 3  # Max retries for failed operations (e.g., NaN losses)
-  tolerance: 1e-5  # Numerical tolerance for comparisons
-
-# Backward compatibility - old section names
-perturbation_section2:
-  steps: 24
-  eta_init: 0.017
-  clip_norm: 0.12
-  momentum: 0.91
-  patience: 7
-  eval_batch_size: 1600
-
-perturbation_section3:
-  epochs: 100
-  eta_init: 0.045
-  clip_norm: 0.23
-  momentum: 0.975
-  patience: 6
-  lambda_entropy: 0.012
-  eval_batch_size: 600
-  bandwidth_base: 0.22

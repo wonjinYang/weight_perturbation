@@ -1,7 +1,7 @@
 # This script demonstrates the Weight Perturbation strategy for Section 3 (evidence-based perturbation without explicit target).
 # It pretrains a WGAN-GP generator on a toy real data distribution (e.g., Gaussian clusters),
 # samples multiple evidence domains (circularly placed clusters), estimates a virtual target via broadened KDE,
-# and applies perturbation using the WeightPerturberSection3 class to align the generator's output with the evidence.
+# and applies perturbation using the WeightPerturberTargetNotGiven class to align the generator's output with the evidence.
 # Finally, it evaluates the results by computing multi-marginal OT losses and plotting distributions.
 
 import torch
@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
     parser.add_argument("--pretrain_epochs", type=int, default=300, help="Number of pretraining epochs")
     parser.add_argument("--perturb_epochs", type=int, default=100, help="Number of perturbation epochs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for pretraining")
+    parser.add_argument("--batch_size", type=int, default=96, help="Batch size for pretraining")
     parser.add_argument("--eval_batch_size", type=int, default=600, help="Batch size for evaluation and virtual sampling")
     parser.add_argument("--noise_dim", type=int, default=2, help="Dimension of noise input")
     parser.add_argument("--data_dim", type=int, default=2, help="Dimension of data output")
@@ -39,6 +39,11 @@ def parse_args():
     parser.add_argument("--num_evidence_domains", type=int, default=3, help="Number of evidence domains")
     parser.add_argument("--samples_per_domain", type=int, default=35, help="Samples per evidence domain")
     parser.add_argument("--random_shift", type=float, default=3.4, help="Radius for circular evidence placement")
+    parser.add_argument("--eta_init", type=float, default=0.05, help="Initial learning rate")
+    parser.add_argument("--clip_norm", type=float, default=0.23, help="Gradient clipping norm")
+    parser.add_argument("--momentum", type=float, default=0.975, help="Momentum factor")
+    parser.add_argument("--patience", type=int, default=6, help="Patience for early stopping")
+    parser.add_argument("--lambda_entropy", type=float, default=0.012, help="Entropy regularization coefficient")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of distributions")
     parser.add_argument("--verbose", action="store_true", help="Print verbose output during training")
     return parser.parse_args()
@@ -68,9 +73,31 @@ def main():
             'num_evidence_domains': args.num_evidence_domains,
             'samples_per_domain': args.samples_per_domain,
             'random_shift': args.random_shift,
+            'eta_init': args.eta_init,
+            'clip_norm': args.clip_norm,
+            'momentum': args.momentum,
+            'patience': args.patience,
+            'lambda_entropy': args.lambda_entropy,
             'plot': args.plot,
             'verbose': args.verbose
         }
+    
+    # Adaptive learning rate configuration for evidence-based perturbation
+    perturbation_config = {
+        'noise_dim': config['noise_dim'],
+        'eval_batch_size': config['eval_batch_size'],
+        'eta_init': config['eta_init'],
+        'eta_min': 1e-4,
+        'eta_max': 0.5,
+        'eta_decay_factor': 0.75,
+        'eta_boost_factor': 1.1,
+        'clip_norm': config['clip_norm'],
+        'momentum': config['momentum'],
+        'patience': config['patience'],
+        'rollback_patience': 4,
+        'lambda_entropy': config['lambda_entropy'],
+        'improvement_threshold': 1e-3,
+    }
     
     # Set seed and device
     set_seed(config["seed"])
@@ -93,9 +120,10 @@ def main():
     
     # Define real data sampler (closure for compatibility)
     def real_sampler(batch_size: int):
+        means = [torch.tensor([0.0, 0.0], device=device, dtype=torch.float32)]
         return sample_real_data(
             batch_size=batch_size,
-            means=None,  # Default 4 clusters
+            means=means,  # Default 4 clusters
             std=0.7,
             device=device
         )
@@ -110,8 +138,8 @@ def main():
         batch_size=config["batch_size"],
         lr=2e-4,
         betas=(0.5, 0.98),
-        gp_lambda=0.06,
-        critic_iters=2,
+        gp_lambda=0.5,
+        critic_iters=4,
         noise_dim=config["noise_dim"],
         device=device,
         verbose=config["verbose"]
@@ -127,23 +155,23 @@ def main():
         device=device
     )
     
-    # Initialize perturber
+    # Initialize perturber with adaptive learning rate configuration
     perturber = WeightPerturberTargetNotGiven(
         generator=pretrained_gen,
         evidence_list=evidence_list,
         centers=centers,
-        config=config
+        config=perturbation_config
     )
     
-    # Perform perturbation
-    print("Starting perturbation...")
+    # Perform perturbation with adaptive learning rate and rollback
+    print("Starting perturbation with adaptive learning rate...")
     perturbed_gen = perturber.perturb(
         epochs=config["perturb_epochs"],
-        eta_init=0.045,
-        clip_norm=0.23,
-        momentum=0.975,
-        patience=6,
-        lambda_entropy=0.012,
+        eta_init=config["eta_init"],
+        clip_norm=config["clip_norm"],
+        momentum=config["momentum"],
+        patience=config["patience"],
+        lambda_entropy=config["lambda_entropy"],
         verbose=config["verbose"]
     )
     print("Perturbation completed.")
@@ -161,7 +189,7 @@ def main():
         evidence_list,
         weights=None,
         blur=0.06,
-        entropy_lambda=0.012
+        entropy_lambda=config["lambda_entropy"]
     ).item()
     
     ot_perturbed = multi_marginal_ot_loss(
@@ -169,12 +197,16 @@ def main():
         evidence_list,
         weights=None,
         blur=0.06,
-        entropy_lambda=0.012
+        entropy_lambda=config["lambda_entropy"]
     ).item()
     
+    print("\n" + "="*50)
+    print("FINAL RESULTS")
+    print("="*50)
     print(f"Multi-Marginal OT (Original to Evidence): {ot_original:.4f}")
     print(f"Multi-Marginal OT (Perturbed to Evidence): {ot_perturbed:.4f}")
     print(f"Improvement: {((ot_original - ot_perturbed) / ot_original):.4f}")
+    print("="*50)
     
     # Optional plotting (using a final virtual target for visualization)
     if args.plot:
