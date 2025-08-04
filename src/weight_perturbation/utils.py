@@ -1,10 +1,15 @@
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-import yaml
 import os
+import yaml
 from typing import Iterable, Optional, List, Union, Dict, Any
 import numpy as np
+
+# Handle matplotlib backend before importing pyplot
+import matplotlib
+if 'DISPLAY' not in os.environ or os.environ.get('MPLBACKEND') == 'Agg':
+    matplotlib.use('Agg')  # Use non-interactive backend for headless environments
+import matplotlib.pyplot as plt
 
 def parameters_to_vector(parameters: Iterable[torch.Tensor]) -> torch.Tensor:
     """
@@ -28,14 +33,25 @@ def parameters_to_vector(parameters: Iterable[torch.Tensor]) -> torch.Tensor:
         >>> vec.shape
         torch.Size([total_num_elements])
     """
-    if not parameters:
+    # Convert to list to handle generators properly
+    param_list = list(parameters)
+    
+    if not param_list:
         raise ValueError("Parameters iterable must not be empty.")
     
-    device = next(iter(parameters)).device
-    if any(p.device != device for p in parameters):
+    device = param_list[0].device
+    if any(p.device != device for p in param_list):
         raise ValueError("All parameters must be on the same device.")
     
-    vec = [p.contiguous().view(-1) for p in parameters]
+    # Filter out parameters with no elements and flatten
+    vec = []
+    for p in param_list:
+        if p.numel() > 0:  # Only include parameters with elements
+            vec.append(p.contiguous().view(-1))
+    
+    if not vec:
+        raise ValueError("No valid parameters found (all parameters are empty).")
+    
     return torch.cat(vec)
 
 def vector_to_parameters(vec: torch.Tensor, parameters: Iterable[torch.Tensor]) -> None:
@@ -58,20 +74,24 @@ def vector_to_parameters(vec: torch.Tensor, parameters: Iterable[torch.Tensor]) 
         >>> vec = parameters_to_vector(params)
         >>> vector_to_parameters(vec + 0.1, params)  # Perturbs parameters in-place
     """
-    if not parameters:
+    # Convert to list to handle generators properly
+    param_list = list(parameters)
+    
+    if not param_list:
         raise ValueError("Parameters iterable must not be empty.")
     
-    device = next(iter(parameters)).device
+    device = param_list[0].device
     if vec.device != device:
         raise ValueError("Vector and parameters must be on the same device.")
     
     pointer = 0
-    for param in parameters:
+    for param in param_list:
         numel = param.numel()
-        if pointer + numel > vec.numel():
-            raise ValueError("Vector size does not match total parameters size.")
-        param.data.copy_(vec[pointer : pointer + numel].view_as(param).data)
-        pointer += numel
+        if numel > 0:  # Only process parameters with elements
+            if pointer + numel > vec.numel():
+                raise ValueError("Vector size does not match total parameters size.")
+            param.data.copy_(vec[pointer : pointer + numel].view_as(param).data)
+            pointer += numel
     
     if pointer != vec.numel():
         raise ValueError("Vector size does not match total parameters size.")
@@ -137,10 +157,17 @@ def plot_distributions(
     plt.grid(True)
     
     if save_path:
-        plt.savefig(save_path)
+        try:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Plot saved to {save_path}")
+        except Exception as e:
+            print(f"Warning: Could not save plot to {save_path}: {e}")
     
-    if show:
-        plt.show()
+    if show and 'DISPLAY' in os.environ:
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"Warning: Could not display plot: {e}")
     else:
         plt.close()
 

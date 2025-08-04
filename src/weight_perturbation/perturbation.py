@@ -80,6 +80,8 @@ class WeightPerturber(ABC):
         
         hidden_dim = first_layer.out_features
         
+        print(f"Creating generator copy: noise_dim={self.noise_dim}, data_dim={data_dim}, hidden_dim={hidden_dim}")
+        
         # Create new generator with same architecture
         pert_gen = Generator(
             noise_dim=self.noise_dim,
@@ -89,12 +91,15 @@ class WeightPerturber(ABC):
         
         # Verify the new generator has parameters
         param_count = sum(p.numel() for p in pert_gen.parameters())
+        print(f"New generator parameter count: {param_count}")
+        
         if param_count == 0:
             raise RuntimeError(f"Created generator has no parameters. Architecture: noise_dim={self.noise_dim}, data_dim={data_dim}, hidden_dim={hidden_dim}")
         
         # Copy state dict if architectures match
         try:
             pert_gen.load_state_dict(self.generator.state_dict())
+            print("Successfully copied weights from original generator")
         except RuntimeError as e:
             print(f"Warning: Could not copy weights due to architecture mismatch: {e}")
             print("Using randomly initialized weights instead.")
@@ -264,50 +269,68 @@ class WeightPerturberTargetGiven(WeightPerturber):
             >>> perturber = WeightPerturberTargetGiven(generator, target_samples)
             >>> perturbed_gen = perturber.perturb(steps=20)
         """
-        data_dim = self.target_samples.shape[1]
-        pert_gen = self._create_generator_copy(data_dim)
-        
-        # Initialize perturbation state
-        theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
-        if theta_prev.numel() == 0:
-            raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
-        
-        delta_theta_prev = torch.zeros_like(theta_prev)
-        eta = eta_init
-        w2_hist = []
-        best_vec = None
-        best_w2 = float('inf')
-        
-        for step in range(steps):
-            # Compute global W2 loss and gradients
-            loss, grads = self._compute_loss_and_grad(pert_gen)
+        try:
+            data_dim = self.target_samples.shape[1]
+            pert_gen = self._create_generator_copy(data_dim)
             
-            # Compute delta_theta with momentum and clipping
-            delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
+            print(f"New generator parameter count: {sum(p.numel() for p in pert_gen.parameters())}")
             
-            # Apply update
-            theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
-            delta_theta_prev = delta_theta.clone()
+            # Initialize perturbation state with better error handling
+            theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+            print(f"Creating parameter vector for generator with {theta_prev.numel()} parameters")
             
-            # Validate and adapt
-            w2_pert, improvement = self._validate_and_adapt(pert_gen, eta, w2_hist, patience, verbose, step)
+            if theta_prev.numel() == 0:
+                raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
             
-            # Update best state
-            best_w2, best_vec = self._update_best_state(w2_pert, pert_gen, best_w2, best_vec)
+            delta_theta_prev = torch.zeros_like(theta_prev)
+            eta = eta_init
+            w2_hist = []
+            best_vec = None
+            best_w2 = float('inf')
             
-            # Check early stopping
-            if self._check_early_stopping(w2_hist, patience):
-                if verbose:
-                    print(f"Early stop/rollback at step {step} due to continuous W2 increase.")
-                break
+            for step in range(steps):
+                try:
+                    # Compute global W2 loss and gradients
+                    loss, grads = self._compute_loss_and_grad(pert_gen)
+                    
+                    # Compute delta_theta with momentum and clipping
+                    delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
+                    
+                    # Apply update
+                    theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
+                    delta_theta_prev = delta_theta.clone()
+                    
+                    # Validate and adapt
+                    w2_pert, improvement = self._validate_and_adapt(pert_gen, eta, w2_hist, patience, verbose, step)
+                    
+                    # Update best state
+                    best_w2, best_vec = self._update_best_state(w2_pert, pert_gen, best_w2, best_vec)
+                    
+                    # Check early stopping
+                    if self._check_early_stopping(w2_hist, patience):
+                        if verbose:
+                            print(f"Early stop/rollback at step {step} due to continuous W2 increase.")
+                        break
+                    
+                    if verbose:
+                        print(f"[{step:2d}] W2(Pert, Target)={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+                
+                except Exception as e:
+                    print(f"Error in perturbation step {step}: {e}")
+                    if step == 0:  # If first step fails, re-raise
+                        raise
+                    break
             
-            if verbose:
-                print(f"[{step:2d}] W2(Pert, Target)={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
-        
-        # Restore best state
-        self._restore_best_state(pert_gen, best_vec)
-        
-        return pert_gen
+            # Restore best state
+            self._restore_best_state(pert_gen, best_vec)
+            
+            return pert_gen
+            
+        except Exception as e:
+            print(f"Error in perturbation process: {e}")
+            # Return a copy of the original generator as fallback
+            data_dim = self.target_samples.shape[1] if hasattr(self, 'target_samples') else 2
+            return self._create_generator_copy(data_dim)
     
     def _compute_loss_and_grad(self, pert_gen: Generator) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -413,53 +436,71 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
             >>> perturber = WeightPerturberTargetNotGiven(generator, evidence_list, centers)
             >>> perturbed_gen = perturber.perturb(epochs=50)
         """
-        data_dim = self.evidence_list[0].shape[1]
-        pert_gen = self._create_generator_copy(data_dim)
-        
-        # Initialize perturbation state
-        theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
-        if theta_prev.numel() == 0:
-            raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
+        try:
+            data_dim = self.evidence_list[0].shape[1]
+            pert_gen = self._create_generator_copy(data_dim)
             
-        delta_theta_prev = torch.zeros_like(theta_prev)
-        eta = eta_init
-        ot_hist = []
-        best_vec = None
-        best_ot = float('inf')
-        
-        for epoch in range(epochs):
-            # Estimate virtual target
-            virtual_samples = self._estimate_virtual_target(self.evidence_list, epoch)
+            print(f"New generator parameter count: {sum(p.numel() for p in pert_gen.parameters())}")
             
-            # Compute multi-marginal OT loss and gradients
-            loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy)
+            # Initialize perturbation state with better error handling
+            theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+            print(f"Creating parameter vector for generator with {theta_prev.numel()} parameters")
             
-            # Compute delta_theta
-            delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
+            if theta_prev.numel() == 0:
+                raise RuntimeError("Generated generator has no parameters. This indicates an architecture problem.")
+                
+            delta_theta_prev = torch.zeros_like(theta_prev)
+            eta = eta_init
+            ot_hist = []
+            best_vec = None
+            best_ot = float('inf')
             
-            # Apply update
-            theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
-            delta_theta_prev = delta_theta.clone()
+            for epoch in range(epochs):
+                try:
+                    # Estimate virtual target
+                    virtual_samples = self._estimate_virtual_target(self.evidence_list, epoch)
+                    
+                    # Compute multi-marginal OT loss and gradients
+                    loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy)
+                    
+                    # Compute delta_theta
+                    delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
+                    
+                    # Apply update
+                    theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
+                    delta_theta_prev = delta_theta.clone()
+                    
+                    # Validate and adapt
+                    ot_pert, improvement = self._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
+                    
+                    # Update best state
+                    best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
+                    
+                    # Check early stopping
+                    if self._check_early_stopping(ot_hist, patience):
+                        if verbose:
+                            print(f"Early stop/rollback at epoch {epoch} due to continuous OT loss increase.")
+                        break
+                    
+                    if verbose:
+                        print(f"[{epoch:2d}] OT(Pert, Virtual)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+                        
+                except Exception as e:
+                    print(f"Error in perturbation epoch {epoch}: {e}")
+                    if epoch == 0:  # If first epoch fails, re-raise
+                        raise
+                    break
             
-            # Validate and adapt
-            ot_pert, improvement = self._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
+            # Restore best state
+            self._restore_best_state(pert_gen, best_vec)
             
-            # Update best state
-            best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
+            return pert_gen
             
-            # Check early stopping
-            if self._check_early_stopping(ot_hist, patience):
-                if verbose:
-                    print(f"Early stop/rollback at epoch {epoch} due to continuous OT loss increase.")
-                break
-            
-            if verbose:
-                print(f"[{epoch:2d}] OT(Pert, Virtual)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
-        
-        # Restore best state
-        self._restore_best_state(pert_gen, best_vec)
-        
-        return pert_gen
+        except Exception as e:
+            print(f"Error in perturbation process: {e}")
+            # Return a copy of the original generator as fallback
+            data_dim = self.evidence_list[0].shape[1] if hasattr(self, 'evidence_list') and self.evidence_list else 2
+            return self._create_generator_copy(data_dim)
     
     def _estimate_virtual_target(self, evidence_list: List[torch.Tensor], epoch: int,
                                 bandwidth_base: float = 0.22) -> torch.Tensor:

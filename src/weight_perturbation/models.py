@@ -31,6 +31,11 @@ class Generator(nn.Module):
         if activation is None:
             activation = nn.LeakyReLU(0.2)
         
+        # Store dimensions for debugging
+        self.noise_dim = noise_dim
+        self.data_dim = data_dim
+        self.hidden_dim = hidden_dim
+        
         self.model = nn.Sequential(
             nn.Linear(noise_dim, hidden_dim),
             activation,
@@ -40,6 +45,21 @@ class Generator(nn.Module):
             activation,
             nn.Linear(hidden_dim, data_dim)
         )
+        
+        # Verify parameters were created
+        param_count = sum(p.numel() for p in self.parameters())
+        if param_count == 0:
+            raise RuntimeError(f"Generator created with no parameters! dims: {noise_dim}, {data_dim}, {hidden_dim}")
+        
+        # Initialize parameters to ensure they're not empty
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        """Initialize weights for Linear layers."""
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, 0.0, 0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -80,6 +100,10 @@ class Critic(nn.Module):
         if activation is None:
             activation = nn.LeakyReLU(0.2)
         
+        # Store dimensions for debugging
+        self.data_dim = data_dim
+        self.hidden_dim = hidden_dim
+        
         self.model = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
             activation,
@@ -89,6 +113,21 @@ class Critic(nn.Module):
             activation,
             nn.Linear(hidden_dim, 1)
         )
+        
+        # Verify parameters were created
+        param_count = sum(p.numel() for p in self.parameters())
+        if param_count == 0:
+            raise RuntimeError(f"Critic created with no parameters! dims: {data_dim}, {hidden_dim}")
+        
+        # Initialize parameters
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        """Initialize weights for Linear layers."""
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, 0.0, 0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

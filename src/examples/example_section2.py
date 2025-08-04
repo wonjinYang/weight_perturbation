@@ -1,7 +1,7 @@
 # This script demonstrates the Weight Perturbation strategy for Section 2 (target-given perturbation).
 # It pretrains a WGAN-GP generator on a toy real data distribution (e.g., Gaussian clusters),
 # samples a target distribution (shifted clusters), and applies perturbation using the
-# WeightPerturberSection2 class to align the generator's output with the target.
+# WeightPerturberTargetGiven class to align the generator's output with the target.
 # Finally, it evaluates the results by computing Wasserstein-2 distances and plotting distributions.
 
 import torch
@@ -28,9 +28,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default=None, help="Device to use ('cpu' or 'cuda')")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
-    parser.add_argument("--pretrain_epochs", type=int, default=300, help="Number of pretraining epochs")
+    parser.add_argument("--pretrain_epochs", type=int, default=700, help="Number of pretraining epochs")
     parser.add_argument("--perturb_steps", type=int, default=24, help="Number of perturbation steps")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for pretraining")
+    parser.add_argument("--batch_size", type=int, default=96, help="Batch size for pretraining")
     parser.add_argument("--eval_batch_size", type=int, default=1600, help="Batch size for evaluation")
     parser.add_argument("--noise_dim", type=int, default=2, help="Dimension of noise input")
     parser.add_argument("--data_dim", type=int, default=2, help="Dimension of data output")
@@ -103,7 +103,7 @@ def main():
         batch_size=config["batch_size"],
         lr=2e-4,
         betas=(0.0, 0.9),
-        gp_lambda=10.0,
+        gp_lambda=0.06,
         critic_iters=5,
         noise_dim=config["noise_dim"],
         device=device,

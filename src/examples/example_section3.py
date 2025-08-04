@@ -26,7 +26,7 @@ from weight_perturbation import (
 # Parse command-line arguments for customization
 def parse_args():
     parser = argparse.ArgumentParser(description="Demo for Section 3: Evidence-Based Weight Perturbation")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--seed", type=int, default=2025, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default=None, help="Device to use ('cpu' or 'cuda')")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
     parser.add_argument("--pretrain_epochs", type=int, default=300, help="Number of pretraining epochs")
@@ -96,7 +96,7 @@ def main():
         return sample_real_data(
             batch_size=batch_size,
             means=None,  # Default 4 clusters
-            std=0.4,
+            std=0.7,
             device=device
         )
     
@@ -109,9 +109,9 @@ def main():
         epochs=config["pretrain_epochs"],
         batch_size=config["batch_size"],
         lr=2e-4,
-        betas=(0.0, 0.9),
-        gp_lambda=10.0,
-        critic_iters=5,
+        betas=(0.5, 0.98),
+        gp_lambda=0.06,
+        critic_iters=2,
         noise_dim=config["noise_dim"],
         device=device,
         verbose=config["verbose"]
@@ -123,7 +123,7 @@ def main():
         num_domains=config["num_evidence_domains"],
         samples_per_domain=config["samples_per_domain"],
         random_shift=config["random_shift"],
-        std=0.7,
+        std=0.4,
         device=device
     )
     
@@ -182,7 +182,7 @@ def main():
         final_virtual = virtual_target_sampler(
             evidence_list,
             weights=None,
-            bandwidth=0.22,
+            bandwidth=0.19,
             num_samples=config["eval_batch_size"],
             temperature=1.0,
             device=device

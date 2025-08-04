@@ -35,14 +35,21 @@ def sample_real_data(
     device = torch.device(device)
     
     if means is None:
-        means = [torch.tensor([2.0, 0.0]), torch.tensor([-2.0, 0.0]),
-                 torch.tensor([0.0, 2.0]), torch.tensor([0.0, -2.0])]
+        means = [torch.tensor([2.0, 0.0], device=device, dtype=torch.float32), 
+                 torch.tensor([-2.0, 0.0], device=device, dtype=torch.float32),
+                 torch.tensor([0.0, 2.0], device=device, dtype=torch.float32), 
+                 torch.tensor([0.0, -2.0], device=device, dtype=torch.float32)]
     else:
         if len(means) == 0:
             raise ValueError("Means list cannot be empty.")
-        # Use detach().clone() to avoid warning
-        means = [torch.tensor(m, dtype=torch.float32).detach().clone() if isinstance(m, torch.Tensor) 
-                else torch.tensor(m, dtype=torch.float32) for m in means]
+        # Convert all means to torch tensors on the correct device
+        converted_means = []
+        for m in means:
+            if isinstance(m, torch.Tensor):
+                converted_means.append(m.detach().clone().to(device))
+            else:
+                converted_means.append(torch.tensor(m, dtype=torch.float32, device=device))
+        means = converted_means
     
     num_clusters = len(means)
     data_dim = means[0].shape[0]
@@ -55,7 +62,7 @@ def sample_real_data(
     samples = []
     for i, mean in enumerate(means):
         n = samples_per_cluster + (1 if i < remainder else 0)
-        cluster_samples = mean.to(device) + std * torch.randn(n, data_dim, device=device)
+        cluster_samples = mean + std * torch.randn(n, data_dim, device=device)
         samples.append(cluster_samples)
     
     return torch.cat(samples, dim=0)
@@ -95,19 +102,29 @@ def sample_target_data(
     device = torch.device(device)
     
     if means is None:
-        means = [torch.tensor([2.0, 0.0]), torch.tensor([-2.0, 0.0]),
-                 torch.tensor([0.0, 2.0]), torch.tensor([0.0, -2.0])]
+        means = [torch.tensor([2.0, 0.0], device=device, dtype=torch.float32), 
+                 torch.tensor([-2.0, 0.0], device=device, dtype=torch.float32),
+                 torch.tensor([0.0, 2.0], device=device, dtype=torch.float32), 
+                 torch.tensor([0.0, -2.0], device=device, dtype=torch.float32)]
     else:
         if len(means) == 0:
             raise ValueError("Means list cannot be empty.")
-        # Use detach().clone() to avoid warning  
-        means = [torch.tensor(m, dtype=torch.float32).detach().clone() if isinstance(m, torch.Tensor)
-                else torch.tensor(m, dtype=torch.float32) for m in means]
+        # Convert all means to torch tensors on the correct device
+        converted_means = []
+        for m in means:
+            if isinstance(m, torch.Tensor):
+                converted_means.append(m.detach().clone().to(device))
+            else:
+                converted_means.append(torch.tensor(m, dtype=torch.float32, device=device))
+        means = converted_means
     
     if shift is None:
-        shift = torch.tensor([1.8, 1.8], dtype=torch.float32)
+        shift = torch.tensor([1.8, 1.8], dtype=torch.float32, device=device)
     else:
-        shift = torch.tensor(shift, dtype=torch.float32)
+        if isinstance(shift, torch.Tensor):
+            shift = shift.to(device)
+        else:
+            shift = torch.tensor(shift, dtype=torch.float32, device=device)
     
     data_dim = means[0].shape[0]
     if shift.shape[0] != data_dim:
@@ -212,8 +229,13 @@ def kde_sampler(
     
     if adaptive:
         # Simple adaptive: scale bandwidth by local std (heuristic)
-        local_std = torch.std(means, dim=0, keepdim=True) + 1e-5
-        bandwidth = bandwidth * local_std.mean().item()
+        # Fix the issue with std calculation
+        if n_points > 1:
+            local_std = torch.std(evidence, dim=0, keepdim=True) + 1e-5
+            bandwidth = bandwidth * local_std.mean().item()
+        else:
+            # Single point case, use original bandwidth
+            bandwidth = bandwidth
     
     samples = means + bandwidth * torch.randn(num_samples, data_dim, device=device)
     return samples

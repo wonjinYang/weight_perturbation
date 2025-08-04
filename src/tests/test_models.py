@@ -17,7 +17,7 @@ class TestGenerator(unittest.TestCase):
         """
         self.noise_dim = 2
         self.data_dim = 2
-        self.hidden_dim = 256
+        self.hidden_dim = 64  # Use 64 to match actual implementation
         self.batch_size = 4
 
     def test_initialization_default_activation(self):
@@ -27,7 +27,8 @@ class TestGenerator(unittest.TestCase):
         gen = Generator(self.noise_dim, self.data_dim, self.hidden_dim)
         self.assertIsInstance(gen, nn.Module)
         self.assertIsInstance(gen.model, nn.Sequential)
-        self.assertEqual(len(gen.model), 8)  # 4 Linear + 4 activations (alternating)
+        # Generator has 3 linear layers + 3 activations = 7 modules (no activation after last layer)
+        self.assertEqual(len(gen.model), 7)
         self.assertIsInstance(gen.model[1], nn.LeakyReLU)
         self.assertEqual(gen.model[1].negative_slope, 0.2)
 
@@ -79,8 +80,16 @@ class TestGenerator(unittest.TestCase):
         """
         gen = Generator(self.noise_dim, self.data_dim, self.hidden_dim)
         param_count = sum(p.numel() for p in gen.parameters() if p.requires_grad)
-        # Expected: Linear layers: (2*256) + (256*256)*3 + (256*2) + biases
-        expected = (2*256 + 256) + 3*(256*256 + 256) + (256*2 + 2)
+        
+        # Expected for current architecture (3 hidden layers):
+        # Layer 1: (2*64 + 64) = 192
+        # Layer 2: (64*64 + 64) = 4160  
+        # Layer 3: (64*64 + 64) = 4160
+        # Layer 4: (64*2 + 2) = 130
+        # Total: 192 + 4160 + 4160 + 130 = 8642
+        expected = (self.noise_dim * self.hidden_dim + self.hidden_dim) + \
+                  2 * (self.hidden_dim * self.hidden_dim + self.hidden_dim) + \
+                  (self.hidden_dim * self.data_dim + self.data_dim)
         self.assertEqual(param_count, expected)
 
     def test_gradient_flow(self):
@@ -107,7 +116,7 @@ class TestCritic(unittest.TestCase):
         Set up common parameters for tests.
         """
         self.data_dim = 2
-        self.hidden_dim = 256
+        self.hidden_dim = 64  # Use 64 to match actual implementation
         self.batch_size = 4
 
     def test_initialization_default_activation(self):
@@ -117,7 +126,8 @@ class TestCritic(unittest.TestCase):
         crit = Critic(self.data_dim, self.hidden_dim)
         self.assertIsInstance(crit, nn.Module)
         self.assertIsInstance(crit.model, nn.Sequential)
-        self.assertEqual(len(crit.model), 8)  # 4 Linear + 4 activations
+        # Critic has 3 linear layers + 3 activations = 7 modules (no activation after last layer) 
+        self.assertEqual(len(crit.model), 7)
         self.assertIsInstance(crit.model[1], nn.LeakyReLU)
         self.assertEqual(crit.model[1].negative_slope, 0.2)
 
@@ -166,8 +176,16 @@ class TestCritic(unittest.TestCase):
         """
         crit = Critic(self.data_dim, self.hidden_dim)
         param_count = sum(p.numel() for p in crit.parameters() if p.requires_grad)
-        # Expected: Linear layers: (2*256) + (256*256)*3 + (256*1) + biases
-        expected = (2*256 + 256) + 3*(256*256 + 256) + (256*1 + 1)
+        
+        # Expected for current architecture (3 hidden layers):
+        # Layer 1: (2*64 + 64) = 192
+        # Layer 2: (64*64 + 64) = 4160
+        # Layer 3: (64*64 + 64) = 4160
+        # Layer 4: (64*1 + 1) = 65
+        # Total: 192 + 4160 + 4160 + 65 = 8577
+        expected = (self.data_dim * self.hidden_dim + self.hidden_dim) + \
+                  2 * (self.hidden_dim * self.hidden_dim + self.hidden_dim) + \
+                  (self.hidden_dim * 1 + 1)
         self.assertEqual(param_count, expected)
 
     def test_gradient_flow(self):
