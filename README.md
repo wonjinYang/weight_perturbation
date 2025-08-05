@@ -272,6 +272,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Utilizes `geomloss` for efficient OT computations.
 - Built with PyTorch for flexibility.
 
-For questions or issues, open a GitHub issue or contact [your.email@example.com](mailto:your.email@example.com).
+For questions or issues, open a GitHub issue or contact [rhrlajrwk56@gmail.com](mailto:rhrlajrwk56@gmail.com).
 ---
 *Generated on August 01, 2025. Library version: 0.1.0*
