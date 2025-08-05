@@ -1,8 +1,7 @@
 import torch
-import torch.nn as nn
 import os
 import yaml
-from typing import Iterable, Optional, List, Union, Dict, Any
+from typing import Iterable, Optional, List, Dict, Any
 import numpy as np
 
 # Handle matplotlib backend before importing pyplot

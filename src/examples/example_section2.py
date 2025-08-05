@@ -6,7 +6,6 @@
 
 import torch
 import argparse
-from typing import Optional
 
 from weight_perturbation import (
     Generator,
@@ -28,16 +27,16 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default=None, help="Device to use ('cpu' or 'cuda')")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
-    parser.add_argument("--pretrain_epochs", type=int, default=700, help="Number of pretraining epochs")
+    parser.add_argument("--pretrain_epochs", type=int, default=500, help="Number of pretraining epochs")
     parser.add_argument("--perturb_steps", type=int, default=24, help="Number of perturbation steps")
     parser.add_argument("--batch_size", type=int, default=96, help="Batch size for pretraining")
-    parser.add_argument("--eval_batch_size", type=int, default=1600, help="Batch size for evaluation")
+    parser.add_argument("--eval_batch_size", type=int, default=800, help="Batch size for evaluation")
     parser.add_argument("--noise_dim", type=int, default=2, help="Dimension of noise input")
     parser.add_argument("--data_dim", type=int, default=2, help="Dimension of data output")
     parser.add_argument("--hidden_dim", type=int, default=256, help="Hidden dimension for models")
-    parser.add_argument("--eta_init", type=float, default=0.025, help="Initial learning rate")
-    parser.add_argument("--clip_norm", type=float, default=0.12, help="Gradient clipping norm")
-    parser.add_argument("--momentum", type=float, default=0.91, help="Momentum factor")
+    parser.add_argument("--eta_init", type=float, default=0.045, help="Initial learning rate")
+    parser.add_argument("--clip_norm", type=float, default=0.4, help="Gradient clipping norm")
+    parser.add_argument("--momentum", type=float, default=0.95, help="Momentum factor")
     parser.add_argument("--patience", type=int, default=7, help="Patience for early stopping")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of distributions")
     parser.add_argument("--verbose", action="store_true", help="Print verbose output during training")
@@ -80,7 +79,7 @@ def main():
         'eta_init': config['eta_init'],
         'eta_min': 1e-5,
         'eta_max': 0.1,
-        'eta_decay_factor': 0.8,
+        'eta_decay_factor': 0.95,
         'eta_boost_factor': 1.05,
         'clip_norm': config['clip_norm'],
         'momentum': config['momentum'],

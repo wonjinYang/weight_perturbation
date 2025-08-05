@@ -168,12 +168,84 @@ def global_w2_loss_and_grad(
     
     return loss.detach(), grads
 
+# def multi_marginal_ot_loss(
+#     generator_outputs: torch.Tensor,
+#     evidence_list: List[torch.Tensor],
+#     weights: Optional[List[float]] = None,
+#     blur: float = 0.06,
+#     entropy_lambda: float = 0.012
+# ) -> torch.Tensor:
+#     """
+#     Compute the multi-marginal OT loss with entropy regularization for Section 3.
+    
+#     This function approximates multi-marginal Wasserstein loss by averaging pairwise
+#     Sinkhorn losses between generator outputs and each evidence domain, with optional
+#     weights and entropy regularization to prevent mode collapse.
+    
+#     Args:
+#         generator_outputs (torch.Tensor): Generated samples, shape (batch_size, data_dim).
+#         evidence_list (List[torch.Tensor]): List of evidence tensors, each (n_ev, data_dim).
+#         weights (Optional[List[float]]): Weights for each evidence domain. Defaults to uniform.
+#         blur (float): Entropic blur for Sinkhorn. Defaults to 0.06.
+#         entropy_lambda (float): Coefficient for entropy regularization. Defaults to 0.012.
+    
+#     Returns:
+#         torch.Tensor: Scalar multi-marginal OT loss.
+    
+#     Raises:
+#         ValueError: If evidence_list is empty or weights mismatch.
+    
+#     Note:
+#         For exact multi-marginal OT, more advanced solvers (e.g., via POT) could be used,
+#         but this provides an efficient approximation.
+    
+#     Example:
+#         >>> gen_out = torch.randn(100, 2)
+#         >>> ev_list = [torch.randn(50, 2) for _ in range(3)]
+#         >>> loss = multi_marginal_ot_loss(gen_out, ev_list)
+#     """
+#     num_domains = len(evidence_list)
+#     if num_domains == 0:
+#         raise ValueError("Evidence list must not be empty.")
+    
+#     if weights is None:
+#         weights = [1.0 / num_domains] * num_domains
+#     elif len(weights) != num_domains:
+#         raise ValueError("Weights must match the number of evidence domains.")
+    
+#     ot_loss = 0.0
+#     sinkhorn = SamplesLoss(loss="sinkhorn", p=2, blur=blur)
+    
+#     for i, evidence in enumerate(evidence_list):
+#         if generator_outputs.shape[1] != evidence.shape[1]:
+#             raise ValueError("All tensors must have the same data dimension.")
+#         pairwise_loss = sinkhorn(generator_outputs, evidence)
+#         ot_loss += weights[i] * pairwise_loss
+    
+#     # Entropy regularization (e.g., via covariance determinant for diversity)
+#     # Add numerical stability
+#     data_dim = generator_outputs.shape[1]
+#     cov = torch.cov(generator_outputs.t()) + torch.eye(data_dim, device=generator_outputs.device) * 1e-5
+    
+#     # Clamp eigenvalues to avoid numerical issues
+#     eigenvals = torch.linalg.eigvals(cov).real
+#     eigenvals = torch.clamp(eigenvals, min=1e-8)
+#     log_det = torch.sum(torch.log(eigenvals))
+    
+#     entropy_reg = -entropy_lambda * log_det
+    
+#     total_loss = ot_loss + entropy_reg
+#     return total_loss
+
 def multi_marginal_ot_loss(
     generator_outputs: torch.Tensor,
     evidence_list: List[torch.Tensor],
+    virtual_targets: torch.Tensor,
     weights: Optional[List[float]] = None,
     blur: float = 0.06,
-    entropy_lambda: float = 0.012
+    lambda_virtual: float = 0.8,
+    lambda_multi: float = 1.0,
+    lambda_entropy: float = 0.012
 ) -> torch.Tensor:
     """
     Compute the multi-marginal OT loss with entropy regularization for Section 3.
@@ -187,8 +259,10 @@ def multi_marginal_ot_loss(
         evidence_list (List[torch.Tensor]): List of evidence tensors, each (n_ev, data_dim).
         weights (Optional[List[float]]): Weights for each evidence domain. Defaults to uniform.
         blur (float): Entropic blur for Sinkhorn. Defaults to 0.06.
-        entropy_lambda (float): Coefficient for entropy regularization. Defaults to 0.012.
-    
+        lambda_virtual (float): Coefficient for virtual target OT loss regularization. Defaults to 0.8.
+        lambda_multi (float): Coefficient for multi-marginal evidence OT loss regularization. Defaults to 1.0.
+        lambda_entropy (float): Coefficient for entropy regularization. Defaults to 0.012.
+
     Returns:
         torch.Tensor: Scalar multi-marginal OT loss.
     
@@ -212,27 +286,26 @@ def multi_marginal_ot_loss(
         weights = [1.0 / num_domains] * num_domains
     elif len(weights) != num_domains:
         raise ValueError("Weights must match the number of evidence domains.")
-    
-    ot_loss = 0.0
     sinkhorn = SamplesLoss(loss="sinkhorn", p=2, blur=blur)
-    
+    loss_virtual = sinkhorn(generator_outputs, virtual_targets)
+
+    loss_multi = 0.0
     for i, evidence in enumerate(evidence_list):
         if generator_outputs.shape[1] != evidence.shape[1]:
             raise ValueError("All tensors must have the same data dimension.")
         pairwise_loss = sinkhorn(generator_outputs, evidence)
-        ot_loss += weights[i] * pairwise_loss
+        loss_multi += weights[i] * pairwise_loss
     
     # Entropy regularization (e.g., via covariance determinant for diversity)
     # Add numerical stability
     data_dim = generator_outputs.shape[1]
     cov = torch.cov(generator_outputs.t()) + torch.eye(data_dim, device=generator_outputs.device) * 1e-5
-    
-    # Clamp eigenvalues to avoid numerical issues
     eigenvals = torch.linalg.eigvals(cov).real
     eigenvals = torch.clamp(eigenvals, min=1e-8)
     log_det = torch.sum(torch.log(eigenvals))
-    
-    entropy_reg = -entropy_lambda * log_det
-    
-    total_loss = ot_loss + entropy_reg
+
+    # Clamp eigenvalues to avoid numerical issues
+    entropy_reg = -lambda_entropy * log_det
+
+    total_loss = lambda_virtual * loss_virtual + lambda_multi * loss_multi + entropy_reg
     return total_loss

@@ -1,14 +1,14 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import List, Optional, Dict, Tuple, Union
+from typing import List, Optional, Dict, Tuple
 from abc import ABC, abstractmethod
 from geomloss import SamplesLoss
 
 from .models import Generator
-from .samplers import sample_target_data, sample_evidence_domains, kde_sampler, virtual_target_sampler
+from .samplers import virtual_target_sampler
 from .losses import global_w2_loss_and_grad, multi_marginal_ot_loss, compute_wasserstein_distance
-from .utils import parameters_to_vector, vector_to_parameters, load_config, plot_distributions
+from .utils import parameters_to_vector, vector_to_parameters, load_config
 
 class WeightPerturber(ABC):
     """
@@ -473,12 +473,14 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
             'patience': 6,
             'rollback_patience': 4,
             'lambda_entropy': 0.012,
+            'lambda_virtual': 0.8,
+            'lambda_multi': 1.0,
             'improvement_threshold': 1e-3,
         }
     
     def perturb(self, epochs: int = 100, eta_init: float = 0.045, clip_norm: float = 0.23,
                 momentum: float = 0.975, patience: int = 6, lambda_entropy: float = 0.012,
-                verbose: bool = True) -> Generator:
+                lambda_virtual: float = 0.8, lambda_multi: float = 1.0, verbose: bool = True) -> Generator:
         """
         Perform the perturbation process for evidence-based case with adaptive learning rate and rollback.
         
@@ -489,6 +491,8 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
             momentum (float): Momentum factor. Defaults to 0.975.
             patience (int): Maximum patience before stopping. Defaults to 6.
             lambda_entropy (float): Entropy regularization coefficient. Defaults to 0.012.
+            lambda_virtual (float): Coefficient for virtual target OT. Defaults to 0.8.
+            lambda_multi (float): Coefficient for multi-marginal evidence OT. Defaults to 1.0.
             verbose (bool): If True, print progress. Defaults to True.
         
         Returns:
@@ -517,7 +521,7 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
                     virtual_samples = self._estimate_virtual_target(self.evidence_list, epoch)
                     
                     # Compute multi-marginal OT loss and gradients
-                    loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy)
+                    loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy, lambda_virtual, lambda_multi)
                     
                     # Compute delta_theta
                     delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
@@ -595,7 +599,8 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
         return virtuals
     
     def _compute_loss_and_grad(self, pert_gen: Generator, virtual_samples: torch.Tensor,
-                               lambda_entropy: float) -> Tuple[torch.Tensor, torch.Tensor]:
+                               lambda_entropy: float, lambda_virtual: float, lambda_multi: float
+                               ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute multi-marginal OT loss and flattened gradients.
         
@@ -605,7 +610,15 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
         pert_gen.train()
         noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
         gen_out = pert_gen(noise)
-        loss = multi_marginal_ot_loss(gen_out, self.evidence_list, blur=0.06, entropy_lambda=lambda_entropy)
+        # loss = multi_marginal_ot_loss(gen_out, self.evidence_list, blur=0.06, entropy_lambda=lambda_entropy)
+        loss = multi_marginal_ot_loss(
+                gen_out, self.evidence_list, virtual_samples,
+                blur=0.06,
+                lambda_virtual=lambda_virtual,
+                lambda_multi=lambda_multi,
+                lambda_entropy=lambda_entropy
+            )
+        
         pert_gen.zero_grad()
         loss.backward()
         grads = torch.cat([p.grad.view(-1) for p in pert_gen.parameters() if p.grad is not None])
@@ -634,8 +647,20 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
             orig_out = self.generator(noise_eval)
             pert_out = pert_gen(noise_eval)
         
-        ot_orig = multi_marginal_ot_loss(orig_out, self.evidence_list).item()
-        ot_pert = multi_marginal_ot_loss(pert_out, self.evidence_list).item()
+
+        ot_orig = multi_marginal_ot_loss(
+            orig_out, self.evidence_list, virtual_samples,
+            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
+            lambda_multi=self.config.get('lambda_multi', 1.0),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012)
+        ).item()
+
+        ot_pert = multi_marginal_ot_loss(
+            pert_out, self.evidence_list, virtual_samples,
+            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
+            lambda_multi=self.config.get('lambda_multi', 1.0),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012)
+        ).item()
         
         # Compute improvement compared to original (lower is better for OT loss)
         improvement = ot_orig - ot_pert

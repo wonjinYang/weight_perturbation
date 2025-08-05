@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Tuple, Union
 
 def compute_gradient_penalty(
     critic: nn.Module,
