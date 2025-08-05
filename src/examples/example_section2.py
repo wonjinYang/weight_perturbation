@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None, help="Device to use ('cpu' or 'cuda')")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
     parser.add_argument("--pretrain_epochs", type=int, default=500, help="Number of pretraining epochs")
-    parser.add_argument("--perturb_steps", type=int, default=24, help="Number of perturbation steps")
+    parser.add_argument("--perturb_steps", type=int, default=100, help="Number of perturbation steps")
     parser.add_argument("--batch_size", type=int, default=96, help="Batch size for pretraining")
     parser.add_argument("--eval_batch_size", type=int, default=800, help="Batch size for evaluation")
     parser.add_argument("--noise_dim", type=int, default=2, help="Dimension of noise input")
@@ -78,13 +78,13 @@ def main():
         'eval_batch_size': config['eval_batch_size'],
         'eta_init': config['eta_init'],
         'eta_min': 1e-5,
-        'eta_max': 0.1,
+        'eta_max': 0.5,
         'eta_decay_factor': 0.95,
         'eta_boost_factor': 1.05,
         'clip_norm': config['clip_norm'],
         'momentum': config['momentum'],
         'patience': config['patience'],
-        'rollback_patience': 3,
+        'rollback_patience': 5,
         'improvement_threshold': 1e-4,
     }
     
@@ -112,7 +112,7 @@ def main():
         return sample_real_data(
             batch_size=batch_size,
             means=None,  # Default 4 clusters
-            std=0.4,
+            std=0.2,
             device=device
         )
     
@@ -125,7 +125,7 @@ def main():
         epochs=config["pretrain_epochs"],
         batch_size=config["batch_size"],
         lr=2e-4,
-        betas=(0.0, 0.9),
+        betas=(0.5, 0.95),
         gp_lambda=0.06,
         critic_iters=5,
         noise_dim=config["noise_dim"],
