@@ -47,16 +47,16 @@ class WeightPerturber(ABC):
         return {
             'noise_dim': 2,
             'eval_batch_size': 1600,
-            'eta_init': 0.017,
-            'eta_min': 1e-5,  # 최소 학습률
-            'eta_max': 0.1,   # 최대 학습률
-            'eta_decay_factor': 0.8,  # 성능 악화시 decay factor
-            'eta_boost_factor': 1.2,  # 성능 개선시 boost factor
-            'clip_norm': 0.12,
-            'momentum': 0.91,
-            'patience': 7,
-            'rollback_patience': 3,  # rollback을 위한 patience
-            'improvement_threshold': 1e-4,  # 개선으로 간주하는 최소 임계값
+            'eta_init': 0.008,
+            'eta_min': 5e-6,
+            'eta_max': 0.05,
+            'eta_decay_factor': 0.88,
+            'eta_boost_factor': 1.03,
+            'clip_norm': 0.15,
+            'momentum': 0.85,
+            'patience': 15,
+            'rollback_patience': 8,
+            'improvement_threshold': 5e-5,
         }
     
     def _initialize_common_params(self) -> None:
@@ -131,9 +131,15 @@ class WeightPerturber(ABC):
         """
         delta_theta = -eta * grads
         norm = delta_theta.norm()
-        max_norm = clip_norm * len(grads)  # Scale by approximate parameter count
+        
+        # Improved clipping with adaptive scaling
+        param_scale = max(1.0, len(grads) / 10000.0)  # Scale by parameter count
+        max_norm = clip_norm * param_scale
+        
         if norm > max_norm:
             delta_theta = delta_theta * (max_norm / (norm + 1e-8))
+        
+        # Apply momentum
         delta_theta = momentum * prev_delta + (1 - momentum) * delta_theta
         return delta_theta
     
@@ -155,36 +161,48 @@ class WeightPerturber(ABC):
         return theta_new
     
     def _adapt_learning_rate(self, eta: float, improvement: float, step: int, 
-                           no_improvement_count: int) -> Tuple[float, int]:
+                           no_improvement_count: int, loss_history: List[float]) -> Tuple[float, int]:
         """
-        Adapt learning rate based on improvement and step count.
+        Improved adaptive learning rate based on improvement trends and step count.
         
         Args:
             eta (float): Current learning rate.
             improvement (float): Current improvement value.
             step (int): Current step/epoch.
             no_improvement_count (int): Consecutive steps without improvement.
+            loss_history (List[float]): Recent loss history for trend analysis.
             
         Returns:
             Tuple[float, int]: (new_eta, updated_no_improvement_count)
         """
-        eta_min = self.config.get('eta_min', 1e-5)
-        eta_max = self.config.get('eta_max', 0.1)
-        eta_decay_factor = self.config.get('eta_decay_factor', 0.8)
-        eta_boost_factor = self.config.get('eta_boost_factor', 1.05)
-        improvement_threshold = self.config.get('improvement_threshold', 1e-4)
+        eta_min = self.config.get('eta_min', 5e-6)
+        eta_max = self.config.get('eta_max', 0.05)
+        eta_decay_factor = self.config.get('eta_decay_factor', 0.88)
+        eta_boost_factor = self.config.get('eta_boost_factor', 1.03)
+        improvement_threshold = self.config.get('improvement_threshold', 5e-5)
+        
+        # Analyze loss trend for better adaptation
+        if len(loss_history) >= 3:
+            recent_trend = sum(loss_history[-3:]) / 3 - sum(loss_history[-6:-3]) / 3 if len(loss_history) >= 6 else 0
+            is_stagnating = abs(recent_trend) < improvement_threshold / 10
+        else:
+            is_stagnating = False
         
         if improvement > improvement_threshold:
             # Significant improvement: boost learning rate slightly
             new_eta = min(eta * eta_boost_factor, eta_max)
             new_no_improvement_count = 0
-        elif improvement < -improvement_threshold:
-            # Performance degradation: decay learning rate
-            new_eta = max(eta * eta_decay_factor, eta_min)
+        elif improvement < -improvement_threshold * 2:  # Stronger degradation threshold
+            # Performance degradation: decay learning rate more aggressively
+            new_eta = max(eta * eta_decay_factor * 0.9, eta_min)
+            new_no_improvement_count = no_improvement_count + 1
+        elif is_stagnating:
+            # Stagnation detected: small decay to escape local minima
+            new_eta = max(eta * 0.95, eta_min)
             new_no_improvement_count = no_improvement_count + 1
         else:
-            # Marginal change: slight decay to maintain stability
-            new_eta = max(eta * 0.99, eta_min)
+            # Marginal change: maintain or slight decay
+            new_eta = max(eta * 0.98, eta_min)
             new_no_improvement_count = no_improvement_count + 1
             
         return new_eta, new_no_improvement_count
@@ -192,7 +210,7 @@ class WeightPerturber(ABC):
     def _check_rollback_condition(self, loss_hist: List[float], 
                                  no_improvement_count: int) -> bool:
         """
-        Check if rollback to best state should be triggered.
+        Improved rollback condition checking with trend analysis.
         
         Args:
             loss_hist (List[float]): History of loss values.
@@ -201,16 +219,26 @@ class WeightPerturber(ABC):
         Returns:
             bool: True if rollback should be triggered.
         """
-        rollback_patience = self.config.get('rollback_patience', 3)
+        rollback_patience = self.config.get('rollback_patience', 8)
         
         # Trigger rollback if no improvement for several consecutive steps
         if no_improvement_count >= rollback_patience:
             return True
             
-        # Also check if loss has been consistently increasing
-        if len(loss_hist) >= rollback_patience:
-            recent_losses = loss_hist[-rollback_patience:]
-            if all(recent_losses[i] >= recent_losses[i-1] for i in range(1, len(recent_losses))):
+        # Check for consistent loss increase over longer period
+        if len(loss_hist) >= rollback_patience + 2:
+            recent_losses = loss_hist[-(rollback_patience + 2):]
+            # Check if loss has been consistently increasing
+            increasing_count = sum(1 for i in range(1, len(recent_losses)) 
+                                 if recent_losses[i] >= recent_losses[i-1])
+            if increasing_count >= rollback_patience:
+                return True
+        
+        # Check for sudden spike in loss
+        if len(loss_hist) >= 3:
+            recent_avg = sum(loss_hist[-3:]) / 3
+            prev_avg = sum(loss_hist[-6:-3]) / 3 if len(loss_hist) >= 6 else recent_avg
+            if recent_avg > prev_avg * 1.5:  # 50% increase
                 return True
                 
         return False
@@ -277,12 +305,12 @@ class WeightPerturber(ABC):
 
 class WeightPerturberTargetGiven(WeightPerturber):
     """
-    Weight Perturber for target-given perturbation using global W2 gradient flow.
+    Weight Perturber for target-given perturbation using improved global W2 gradient flow.
     
     This class performs weight perturbation on a pre-trained generator to align its output
     distribution with a given target distribution. It uses congested transport principles
     with gradient clipping, momentum, adaptive learning rate, and rollback mechanism
-    for stability.
+    for stability and improved convergence.
     
     Args:
         generator (Generator): Pre-trained generator model.
@@ -298,17 +326,17 @@ class WeightPerturberTargetGiven(WeightPerturber):
         if self.target_samples.numel() == 0:
             raise ValueError("Target samples must not be empty.")
     
-    def perturb(self, steps: int = 24, eta_init: float = 0.017, clip_norm: float = 0.12,
-                momentum: float = 0.91, patience: int = 7, verbose: bool = True) -> Generator:
+    def perturb(self, steps: int = 80, eta_init: float = 0.008, clip_norm: float = 0.15,
+                momentum: float = 0.85, patience: int = 15, verbose: bool = True) -> Generator:
         """
-        Perform the perturbation process with adaptive learning rate and rollback.
+        Perform the improved perturbation process with adaptive learning rate and rollback.
         
         Args:
-            steps (int): Number of perturbation steps. Defaults to 24.
-            eta_init (float): Initial learning rate. Defaults to 0.017.
-            clip_norm (float): Gradient clipping norm (congestion bound). Defaults to 0.12.
-            momentum (float): Momentum factor for updates. Defaults to 0.91.
-            patience (int): Maximum patience before stopping. Defaults to 7.
+            steps (int): Number of perturbation steps. Defaults to 80.
+            eta_init (float): Initial learning rate. Defaults to 0.008.
+            clip_norm (float): Gradient clipping norm (congestion bound). Defaults to 0.15.
+            momentum (float): Momentum factor for updates. Defaults to 0.85.
+            patience (int): Maximum patience before stopping. Defaults to 15.
             verbose (bool): If True, print progress. Defaults to True.
         
         Returns:
@@ -327,14 +355,21 @@ class WeightPerturberTargetGiven(WeightPerturber):
             delta_theta_prev = torch.zeros_like(theta_prev)
             eta = eta_init
             w2_hist = []
+            loss_hist = []
             best_vec = None
             best_w2 = float('inf')
             no_improvement_count = 0
+            consecutive_rollbacks = 0
             
             for step in range(steps):
                 try:
-                    # Compute global W2 loss and gradients
+                    # Compute improved global W2 loss and gradients
                     loss, grads = self._compute_loss_and_grad(pert_gen)
+                    
+                    # Add gradient noise for exploration (decreasing with steps)
+                    noise_scale = 0.01 * (1.0 - step / steps)
+                    if noise_scale > 0:
+                        grads = grads + noise_scale * torch.randn_like(grads)
                     
                     # Compute delta_theta with momentum and clipping
                     delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
@@ -346,30 +381,48 @@ class WeightPerturberTargetGiven(WeightPerturber):
                     # Validate and get improvement
                     w2_pert, improvement = self._validate_and_adapt(pert_gen, eta, w2_hist, patience, verbose, step)
                     
+                    # Track loss history
+                    loss_hist.append(loss.item())
+                    
                     # Update best state
                     best_w2, best_vec = self._update_best_state(w2_pert, pert_gen, best_w2, best_vec)
                     
-                    # Adapt learning rate based on improvement
-                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, step, no_improvement_count)
+                    # Adapt learning rate based on improvement and loss history
+                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, step, no_improvement_count, loss_hist)
                     
                     # Check for rollback condition
                     if self._check_rollback_condition(w2_hist, no_improvement_count):
                         if verbose:
                             print(f"Rollback triggered at step {step} (no improvement for {no_improvement_count} steps)")
                         self._restore_best_state(pert_gen, best_vec)
-                        # Reset eta and counters after rollback
-                        eta = eta_init * 0.5  # Start with reduced learning rate
+                        # Reset parameters after rollback
+                        eta = max(eta * (0.7 ** consecutive_rollbacks), self.config.get('eta_min', 5e-6))
                         no_improvement_count = 0
-                        # Reset momentum
+                        consecutive_rollbacks += 1
+                        # Reset momentum to explore new directions
                         delta_theta_prev = torch.zeros_like(delta_theta_prev)
+                        
+                        # If too many rollbacks, break early
+                        if consecutive_rollbacks >= 10:
+                            if verbose:
+                                print(f"Too many rollbacks ({consecutive_rollbacks}), stopping early")
+                            break
+                    else:
+                        consecutive_rollbacks = 0
                     
                     if verbose:
-                        print(f"[{step:2d}] W2(Pert, Target)={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+                        print(f"[{step:2d}] W2(Pert, Target)={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.6f}")
                     
                     # Early stopping if patience exceeded
                     if no_improvement_count >= patience:
                         if verbose:
                             print(f"Early stopping at step {step} due to lack of improvement")
+                        break
+                    
+                    # Additional stopping condition: very good convergence
+                    if w2_pert < 1e-4:  # Very close to target
+                        if verbose:
+                            print(f"Excellent convergence achieved at step {step}")
                         break
                 
                 except Exception as e:
@@ -391,14 +444,23 @@ class WeightPerturberTargetGiven(WeightPerturber):
     
     def _compute_loss_and_grad(self, pert_gen: Generator) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute global W2 loss and flattened gradients.
+        Compute improved global W2 loss and flattened gradients.
         
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: (loss, grads)
         """
         pert_gen.train()
         noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-        loss, grads = global_w2_loss_and_grad(pert_gen, self.target_samples, noise)
+        
+        # Use improved loss function with hybrid approach
+        loss, grads = global_w2_loss_and_grad(
+            pert_gen, 
+            self.target_samples, 
+            noise,
+            use_direct_w2=True,
+            w2_weight=0.7,
+            map_weight=0.3
+        )
         return loss, grads
     
     def _validate_and_adapt(self, pert_gen: Generator, eta: float, w2_hist: List[float],
@@ -423,8 +485,9 @@ class WeightPerturberTargetGiven(WeightPerturber):
             orig_out = self.generator(noise_eval)
             pert_out = pert_gen(noise_eval)
         
-        w2_orig = compute_wasserstein_distance(orig_out, self.target_samples)
-        w2_pert = compute_wasserstein_distance(pert_out, self.target_samples)
+        # Use tighter blur for more accurate evaluation
+        w2_orig = compute_wasserstein_distance(orig_out, self.target_samples, p=2, blur=0.05)
+        w2_pert = compute_wasserstein_distance(pert_out, self.target_samples, p=2, blur=0.05)
         
         # Compute improvement compared to original
         improvement = w2_orig.item() - w2_pert.item()
@@ -537,7 +600,7 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
                     best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
                     
                     # Adapt learning rate based on improvement
-                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, epoch, no_improvement_count)
+                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, epoch, no_improvement_count, ot_hist)
                     
                     # Check for rollback condition
                     if self._check_rollback_condition(ot_hist, no_improvement_count):
@@ -545,7 +608,7 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
                             print(f"Rollback triggered at epoch {epoch} (no improvement for {no_improvement_count} epochs)")
                         self._restore_best_state(pert_gen, best_vec)
                         # Reset eta and counters after rollback
-                        eta = eta_init * 0.6  # Start with reduced learning rate
+                        eta = eta * 0.6  # Start with reduced learning rate
                         no_improvement_count = 0
                         # Reset momentum
                         delta_theta_prev = torch.zeros_like(delta_theta_prev)
@@ -610,14 +673,14 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
         pert_gen.train()
         noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
         gen_out = pert_gen(noise)
-        # loss = multi_marginal_ot_loss(gen_out, self.evidence_list, blur=0.06, entropy_lambda=lambda_entropy)
+        
         loss = multi_marginal_ot_loss(
-                gen_out, self.evidence_list, virtual_samples,
-                blur=0.06,
-                lambda_virtual=lambda_virtual,
-                lambda_multi=lambda_multi,
-                lambda_entropy=lambda_entropy
-            )
+            gen_out, self.evidence_list, virtual_samples,
+            blur=0.06,
+            lambda_virtual=lambda_virtual,
+            lambda_multi=lambda_multi,
+            lambda_entropy=lambda_entropy
+        )
         
         pert_gen.zero_grad()
         loss.backward()
@@ -646,7 +709,6 @@ class WeightPerturberTargetNotGiven(WeightPerturber):
         with torch.no_grad():
             orig_out = self.generator(noise_eval)
             pert_out = pert_gen(noise_eval)
-        
 
         ot_orig = multi_marginal_ot_loss(
             orig_out, self.evidence_list, virtual_samples,

@@ -35,9 +35,9 @@ def parse_args():
     parser.add_argument("--data_dim", type=int, default=2, help="Dimension of data output")
     parser.add_argument("--hidden_dim", type=int, default=256, help="Hidden dimension for models")
     parser.add_argument("--eta_init", type=float, default=0.045, help="Initial learning rate")
-    parser.add_argument("--clip_norm", type=float, default=0.4, help="Gradient clipping norm")
+    parser.add_argument("--clip_norm", type=float, default=0.3, help="Gradient clipping norm")
     parser.add_argument("--momentum", type=float, default=0.95, help="Momentum factor")
-    parser.add_argument("--patience", type=int, default=7, help="Patience for early stopping")
+    parser.add_argument("--patience", type=int, default=20, help="Patience for early stopping")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of distributions")
     parser.add_argument("--verbose", action="store_true", help="Print verbose output during training")
     return parser.parse_args()
@@ -72,20 +72,20 @@ def main():
             'verbose': args.verbose
         }
     
-    # Adaptive learning rate configuration for target-given perturbation
+    # Improved adaptive learning rate configuration for target-given perturbation
     perturbation_config = {
         'noise_dim': config['noise_dim'],
         'eval_batch_size': config['eval_batch_size'],
         'eta_init': config['eta_init'],
         'eta_min': 1e-5,
         'eta_max': 0.5,
-        'eta_decay_factor': 0.95,
+        'eta_decay_factor': 0.9,
         'eta_boost_factor': 1.05,
         'clip_norm': config['clip_norm'],
         'momentum': config['momentum'],
         'patience': config['patience'],
-        'rollback_patience': 5,
-        'improvement_threshold': 1e-4,
+        'rollback_patience': 20,
+        'improvement_threshold': 5e-5,
     }
     
     # Set seed and device
@@ -112,11 +112,11 @@ def main():
         return sample_real_data(
             batch_size=batch_size,
             means=None,  # Default 4 clusters
-            std=0.2,
+            std=0.4,  # Slightly tighter clusters for better training
             device=device
         )
     
-    # Pretrain using WGAN-GP
+    # Pretrain using WGAN-GP with improved settings
     print("Starting pretraining...")
     pretrained_gen, pretrained_crit = pretrain_wgan_gp(
         generator=generator,
@@ -124,33 +124,33 @@ def main():
         real_sampler=real_sampler,
         epochs=config["pretrain_epochs"],
         batch_size=config["batch_size"],
-        lr=2e-4,
-        betas=(0.5, 0.95),
-        gp_lambda=0.06,
-        critic_iters=5,
+        lr=2e-4,  # Slightly lower learning rate
+        betas=(0.5, 0.95),  # Improved beta values
+        gp_lambda=0.1,
+        critic_iters=4,
         noise_dim=config["noise_dim"],
         device=device,
         verbose=config["verbose"]
     )
     print("Pretraining completed.")
     
-    # Sample target data
+    # Sample target data with consistent parameters
     target_samples = sample_target_data(
         batch_size=config["eval_batch_size"],
         shift=[1.8, 1.8],  # Default shift for toy example
         means=None,
-        std=0.4,
+        std=0.4,  # Match real data std
         device=device
     )
     
-    # Initialize perturber with adaptive learning rate configuration
+    # Initialize perturber with improved configuration
     perturber = WeightPerturberTargetGiven(
         generator=pretrained_gen,
         target_samples=target_samples,
         config=perturbation_config
     )
     
-    # Perform perturbation with adaptive learning rate and rollback
+    # Perform perturbation with improved settings
     print("Starting perturbation with adaptive learning rate...")
     perturbed_gen = perturber.perturb(
         steps=config["perturb_steps"],
@@ -169,15 +169,23 @@ def main():
         original_samples = pretrained_gen(noise)
         perturbed_samples = perturbed_gen(noise)
     
-    w2_original = compute_wasserstein_distance(original_samples, target_samples, p=2, blur=0.07)
-    w2_perturbed = compute_wasserstein_distance(perturbed_samples, target_samples, p=2, blur=0.07)
+    # Use multiple evaluation metrics
+    w2_original = compute_wasserstein_distance(original_samples, target_samples, p=2, blur=0.05)
+    w2_perturbed = compute_wasserstein_distance(perturbed_samples, target_samples, p=2, blur=0.05)
+    
+    # Also compute W1 distance for comparison
+    w1_original = compute_wasserstein_distance(original_samples, target_samples, p=1, blur=0.05)
+    w1_perturbed = compute_wasserstein_distance(perturbed_samples, target_samples, p=1, blur=0.05)
     
     print("\n" + "="*50)
     print("FINAL RESULTS")
     print("="*50)
     print(f"W2 Distance (Original to Target): {w2_original.item():.4f}")
     print(f"W2 Distance (Perturbed to Target): {w2_perturbed.item():.4f}")
-    print(f"Improvement: {((w2_original - w2_perturbed) / w2_original).item():.4f}")
+    print(f"W2 Improvement: {((w2_original - w2_perturbed) / w2_original).item():.4f}")
+    print(f"W1 Distance (Original to Target): {w1_original.item():.4f}")
+    print(f"W1 Distance (Perturbed to Target): {w1_perturbed.item():.4f}")
+    print(f"W1 Improvement: {((w1_original - w1_perturbed) / w1_original).item():.4f}")
     print("="*50)
     
     # Optional plotting

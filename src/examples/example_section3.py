@@ -31,8 +31,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=2025, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default=None, help="Device to use ('cpu' or 'cuda')")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
-    parser.add_argument("--pretrain_epochs", type=int, default=300, help="Number of pretraining epochs")
-    parser.add_argument("--perturb_epochs", type=int, default=150, help="Number of perturbation epochs")
+    parser.add_argument("--pretrain_epochs", type=int, default=400, help="Number of pretraining epochs")
+    parser.add_argument("--perturb_epochs", type=int, default=200, help="Number of perturbation epochs")
     parser.add_argument("--batch_size", type=int, default=96, help="Batch size for pretraining")
     parser.add_argument("--eval_batch_size", type=int, default=600, help="Batch size for evaluation and virtual sampling")
     parser.add_argument("--noise_dim", type=int, default=2, help="Dimension of noise input")
@@ -41,12 +41,12 @@ def parse_args():
     parser.add_argument("--num_evidence_domains", type=int, default=3, help="Number of evidence domains")
     parser.add_argument("--samples_per_domain", type=int, default=35, help="Samples per evidence domain")
     parser.add_argument("--random_shift", type=float, default=3.4, help="Radius for circular evidence placement")
-    parser.add_argument("--eta_init", type=float, default=0.45, help="Initial learning rate")
+    parser.add_argument("--eta_init", type=float, default=0.045, help="Initial learning rate")
     parser.add_argument("--clip_norm", type=float, default=0.4, help="Gradient clipping norm")
     parser.add_argument("--momentum", type=float, default=0.975, help="Momentum factor")
     parser.add_argument("--patience", type=int, default=6, help="Patience for early stopping")
     parser.add_argument("--lambda_entropy", type=float, default=0.012, help="Entropy regularization coefficient")
-    parser.add_argument("--lambda_virtual", type=float, default=0.8, help="Virtual loss regularization coefficient")
+    parser.add_argument("--lambda_virtual", type=float, default=1.0, help="Virtual loss regularization coefficient")
     parser.add_argument("--lambda_multi", type=float, default=1.0, help="Evidence loss regularization coefficient")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of distributions")
     parser.add_argument("--verbose", action="store_true", help="Print verbose output during training")
@@ -192,16 +192,22 @@ def main():
     ot_original_evidence = multi_marginal_ot_loss(
         original_samples,
         evidence_list,
+        virtual_targets=final_virtual,
         weights=None,
         blur=0.06,
-        entropy_lambda=config["lambda_entropy"]
+        lambda_entropy=config["lambda_entropy"],
+        lambda_virtual=config["lambda_virtual"],
+        lambda_multi=config["lambda_multi"],
     ).item()
     ot_perturbed_evidence = multi_marginal_ot_loss(
         perturbed_samples,
         evidence_list,
+        virtual_targets=final_virtual,
         weights=None,
         blur=0.06,
-        entropy_lambda=config["lambda_entropy"]
+        lambda_entropy=config["lambda_entropy"],
+        lambda_virtual=config["lambda_virtual"],
+        lambda_multi=config["lambda_multi"],
     ).item()
     # Compute W2 distances to virtual target
     w2_original_virtual = compute_wasserstein_distance(original_samples, final_virtual, p=2, blur=0.06).item()
