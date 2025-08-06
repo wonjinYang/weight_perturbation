@@ -1,34 +1,3 @@
-<img src="https://r2cdn.perplexity.ai/pplx-full-logo-primary-dark%402x.png" class="logo" width="120"/>
-
-### Directory Structure
-
-```
-weight_perturbation/
-├── setup.py                  # For packaging and distribution (e.g., pip install)
-├── README.md                 # Library documentation, usage examples
-├── requirements.txt          # Dependencies (e.g., torch, geomloss, numpy, matplotlib)
-├── src/
-│   ├── weight_perturbation/
-│   │   ├── __init__.py       # Package init: from .perturbation import WeightPerturberTargetGiven
-│   │   ├── models.py         # Neural network models (Generator, Critic)
-│   │   ├── samplers.py       # Data sampling functions for targets, evidence, virtual targets
-│   │   ├── losses.py         # Loss functions (Wasserstein, OT maps, entropy regs)
-│   │   ├── perturbation.py   # Core perturbation classes and functions
-│   │   ├── pretrain.py       # Pretraining utilities for WGAN-GP
-│   │   └── utils.py          # Helper functions (plotting, vectorization, etc.)
-├── tests/                    # Unit tests
-│   ├── test_models.py
-│   ├── test_samplers.py
-│   ├── test_losses.py
-│   ├── test_perturbation.py
-│   └── test_pretrain.py
-├── examples/                 # Usage examples (toy datasets)
-│   ├── example_section2.py   # Demo for target-given perturbation
-│   └── example_section3.py   # Demo for evidence-based perturbation
-└── configs/                  # YAML/JSON configs for hyperparameters
-    └── default.yaml          # Default params (etas, lambdas, etc.)
-```
-
 # Weight Perturbation Library
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -135,6 +104,36 @@ python examples/example_section3.py --plot --verbose --num_evidence_domains=4
 These scripts pretrain a generator, perform perturbation, evaluate Wasserstein distances, and optionally plot results.
 
 ## Documentation
+
+### Directory Structure
+
+```
+weight_perturbation/
+├── setup.py                  # For packaging and distribution (e.g., pip install)
+├── README.md                 # Library documentation, usage examples
+├── requirements.txt          # Dependencies (e.g., torch, geomloss, numpy, matplotlib)
+├── src/
+│   ├── weight_perturbation/
+│   │   ├── __init__.py       # Package init: from .perturbation import WeightPerturberTargetGiven
+│   │   ├── models.py         # Neural network models (Generator, Critic)
+│   │   ├── samplers.py       # Data sampling functions for targets, evidence, virtual targets
+│   │   ├── losses.py         # Loss functions (Wasserstein, OT maps, entropy regs)
+│   │   ├── perturbation.py   # Core perturbation classes and functions
+│   │   ├── pretrain.py       # Pretraining utilities for WGAN-GP
+│   │   └── utils.py          # Helper functions (plotting, vectorization, etc.)
+├── tests/                    # Unit tests
+│   ├── test_models.py
+│   ├── test_samplers.py
+│   ├── test_losses.py
+│   ├── test_perturbation.py
+│   └── test_pretrain.py
+├── examples/                 # Usage examples (toy datasets)
+│   ├── example_section2.py   # Demo for target-given perturbation
+│   └── example_section3.py   # Demo for evidence-based perturbation
+└── configs/                  # YAML/JSON configs for hyperparameters
+    └── default.yaml          # Default params (etas, lambdas, etc.)
+```
+
 
 ### Overview
 The library uses an inheritance-based structure for modularity:
