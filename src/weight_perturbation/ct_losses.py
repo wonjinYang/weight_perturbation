@@ -87,39 +87,56 @@ def global_w2_loss_and_grad_with_congestion(
     
     # Add congestion-aware components if critic is provided
     if critic is not None and track_congestion:
-        # Compute spatial density
-        density_info = compute_spatial_density(gen_out, bandwidth=0.15)
-        sigma = density_info['density_at_samples']
-        
-        # Compute traffic flow
-        flow_info = compute_traffic_flow(
-            critic, generator, noise_samples, sigma, lambda_congestion
-        )
-        
-        # Add Sobolev regularization
-        sobolev_loss = sobolev_regularization(critic, gen_out, sigma, lambda_sobolev)
-        total_loss += sobolev_loss
-        
-        # Compute congestion cost
-        congestion_cost = congestion_cost_function(
-            flow_info['traffic_intensity'], sigma, lambda_congestion
-        ).mean()
-        
-        # Store congestion information
-        congestion_info = {
-            'spatial_density': sigma,
-            'traffic_flow': flow_info['traffic_flow'],
-            'traffic_intensity': flow_info['traffic_intensity'],
-            'congestion_cost': congestion_cost,
-            'sobolev_loss': sobolev_loss,
-            'gradient_norm': flow_info['gradient_norm']
-        }
+        try:
+            # Compute spatial density
+            density_info = compute_spatial_density(gen_out, bandwidth=0.15)
+            sigma = density_info['density_at_samples']
+            
+            # Compute traffic flow
+            flow_info = compute_traffic_flow(
+                critic, generator, noise_samples, sigma, lambda_congestion
+            )
+            
+            # Add Sobolev regularization
+            sobolev_loss = sobolev_regularization(critic, gen_out, sigma, lambda_sobolev)
+            total_loss += sobolev_loss
+            
+            # Compute congestion cost
+            congestion_cost = congestion_cost_function(
+                flow_info['traffic_intensity'], sigma, lambda_congestion
+            ).mean()
+            
+            # Store congestion information
+            congestion_info = {
+                'spatial_density': sigma,
+                'traffic_flow': flow_info['traffic_flow'],
+                'traffic_intensity': flow_info['traffic_intensity'],
+                'congestion_cost': congestion_cost,
+                'sobolev_loss': sobolev_loss,
+                'gradient_norm': flow_info['gradient_norm']
+            }
+        except Exception as e:
+            print(f"Warning: Congestion computation failed: {e}")
+            congestion_info = {
+                'spatial_density': torch.zeros(gen_out.shape[0], device=gen_out.device),
+                'traffic_flow': torch.zeros_like(gen_out),
+                'traffic_intensity': torch.zeros(gen_out.shape[0], device=gen_out.device),
+                'congestion_cost': torch.tensor(0.0, device=gen_out.device),
+                'sobolev_loss': torch.tensor(0.0, device=gen_out.device),
+                'gradient_norm': torch.zeros(gen_out.shape[0], device=gen_out.device)
+            }
     
     # Add diversity regularization
     if gen_out.shape[0] > 1:
-        gen_cov = torch.cov(gen_out.t())
-        diversity_loss = -torch.logdet(gen_cov + 1e-6 * torch.eye(gen_out.shape[1], device=gen_out.device))
-        total_loss += 0.01 * diversity_loss
+        try:
+            gen_cov = torch.cov(gen_out.t())
+            diversity_loss = -torch.logdet(gen_cov + 1e-6 * torch.eye(gen_out.shape[1], device=gen_out.device))
+            total_loss += 0.01 * diversity_loss
+        except:
+            # Fallback diversity term
+            gen_std = gen_out.std(dim=0).mean()
+            diversity_loss = -torch.log(gen_std + 1e-6)
+            total_loss += 0.01 * diversity_loss
     
     # Compute gradients
     generator.zero_grad()
@@ -206,49 +223,69 @@ def multi_marginal_ot_loss_with_congestion(
         if track_congestion and critics is not None and i < len(critics):
             critic = critics[i]
             
-            # Compute spatial density for this evidence domain
-            all_samples = torch.cat([generator_outputs, evidence], dim=0)
-            density_info = compute_spatial_density(all_samples, bandwidth=0.15)
-            sigma_gen = density_info['density_at_samples'][:generator_outputs.shape[0]]
-            
-            # Compute traffic flow for this domain
-            def dummy_generator(z):
-                return generator_outputs
-            
-            flow_info = compute_traffic_flow(
-                critic, dummy_generator, 
-                torch.randn(generator_outputs.shape[0], 2, device=generator_outputs.device), 
-                sigma_gen, lambda_congestion
-            )
-            
-            # Compute congestion cost
-            congestion_cost = congestion_cost_function(
-                flow_info['traffic_intensity'], sigma_gen, lambda_congestion
-            ).mean()
-            
-            # Add Sobolev regularization for this domain
-            sobolev_loss = sobolev_regularization(critic, generator_outputs, sigma_gen, lambda_sobolev)
-            loss_multi += sobolev_loss
-            
-            domain_info = {
-                'domain_id': i,
-                'spatial_density': sigma_gen,
-                'traffic_flow': flow_info['traffic_flow'],
-                'traffic_intensity': flow_info['traffic_intensity'],
-                'congestion_cost': congestion_cost,
-                'sobolev_loss': sobolev_loss,
-                'gradient_norm': flow_info['gradient_norm']
-            }
-            
-            multi_congestion_info['domains'].append(domain_info)
+            try:
+                # Compute spatial density for this evidence domain
+                all_samples = torch.cat([generator_outputs, evidence], dim=0)
+                density_info = compute_spatial_density(all_samples, bandwidth=0.15)
+                sigma_gen = density_info['density_at_samples'][:generator_outputs.shape[0]]
+                
+                # Compute traffic flow for this domain
+                def dummy_generator(z):
+                    return generator_outputs
+                
+                flow_info = compute_traffic_flow(
+                    critic, dummy_generator, 
+                    torch.randn(generator_outputs.shape[0], 2, device=generator_outputs.device), 
+                    sigma_gen, lambda_congestion
+                )
+                
+                # Compute congestion cost
+                congestion_cost = congestion_cost_function(
+                    flow_info['traffic_intensity'], sigma_gen, lambda_congestion
+                ).mean()
+                
+                # Add Sobolev regularization for this domain
+                sobolev_loss = sobolev_regularization(critic, generator_outputs, sigma_gen, lambda_sobolev)
+                loss_multi += sobolev_loss
+                
+                domain_info = {
+                    'domain_id': i,
+                    'spatial_density': sigma_gen,
+                    'traffic_flow': flow_info['traffic_flow'],
+                    'traffic_intensity': flow_info['traffic_intensity'],
+                    'congestion_cost': congestion_cost,
+                    'sobolev_loss': sobolev_loss,
+                    'gradient_norm': flow_info['gradient_norm']
+                }
+                
+                multi_congestion_info['domains'].append(domain_info)
+                
+            except Exception as e:
+                print(f"Warning: Congestion computation failed for domain {i}: {e}")
+                # Create dummy domain info
+                domain_info = {
+                    'domain_id': i,
+                    'spatial_density': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device),
+                    'traffic_flow': torch.zeros_like(generator_outputs),
+                    'traffic_intensity': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device),
+                    'congestion_cost': torch.tensor(0.0, device=generator_outputs.device),
+                    'sobolev_loss': torch.tensor(0.0, device=generator_outputs.device),
+                    'gradient_norm': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device)
+                }
+                if multi_congestion_info:
+                    multi_congestion_info['domains'].append(domain_info)
     
     # Entropy regularization (e.g., via covariance determinant for diversity)
     data_dim = generator_outputs.shape[1]
-    cov = torch.cov(generator_outputs.t()) + torch.eye(data_dim, device=generator_outputs.device) * 1e-5
-    eigenvals = torch.linalg.eigvals(cov).real
-    eigenvals = torch.clamp(eigenvals, min=1e-8)
-    log_det = torch.sum(torch.log(eigenvals))
-    entropy_reg = -lambda_entropy * log_det
+    try:
+        cov = torch.cov(generator_outputs.t()) + torch.eye(data_dim, device=generator_outputs.device) * 1e-5
+        eigenvals = torch.linalg.eigvals(cov).real
+        eigenvals = torch.clamp(eigenvals, min=1e-8)
+        log_det = torch.sum(torch.log(eigenvals))
+        entropy_reg = -lambda_entropy * log_det
+    except:
+        # Fallback entropy regularization
+        entropy_reg = -lambda_entropy * torch.log(generator_outputs.std(dim=0).mean() + 1e-8)
 
     total_loss = lambda_virtual * loss_virtual + lambda_multi * loss_multi + entropy_reg
     return total_loss, multi_congestion_info

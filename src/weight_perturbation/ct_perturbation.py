@@ -398,15 +398,110 @@ class CTWeightPerturber(ABC):
         """
         pass
     
-    @abstractmethod
-    def perturb(self, *args, **kwargs) -> Generator:
-        """
-        Perform the perturbation process.
-        
-        Returns:
-            Generator: Perturbed generator model.
-        """
-        pass
+        @abstractmethod
+        def perturb(self, *args, **kwargs) -> Generator:
+            """
+            Perform the perturbation process.
+            
+            Returns:
+                Generator: Perturbed generator model.
+            """
+            try:
+                data_dim = self.evidence_list[0].shape[1]
+                pert_gen = self._create_generator_copy(data_dim)
+                
+                # Initialize perturbation state
+                theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+                
+                if theta_prev.numel() == 0:
+                    raise RuntimeError("Generated generator has no parameters.")
+                    
+                delta_theta_prev = torch.zeros_like(theta_prev)
+                eta = eta_init
+                ot_hist = []
+                best_vec = None
+                best_ot = float('inf')
+                no_improvement_count = 0
+                
+                for epoch in range(epochs):
+                    try:
+                        # Estimate virtual target with congestion awareness
+                        virtual_samples = self._estimate_virtual_target_with_congestion(
+                            self.evidence_list, epoch
+                        )
+                        
+                        # Generate noise for this epoch
+                        noise_samples = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+                        
+                        # Compute multi-marginal congestion if enabled
+                        multi_congestion_info = None
+                        if self.enable_congestion_tracking and self.critics:
+                            multi_congestion_info = self._compute_multi_marginal_congestion(pert_gen, noise_samples)
+                        
+                        # Compute multi-marginal OT loss and gradients
+                        loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy, lambda_virtual, lambda_multi)
+                        
+                        # Compute delta_theta with multi-marginal congestion awareness
+                        if multi_congestion_info and multi_congestion_info['domains']:
+                            avg_congestion_info = self._average_multi_marginal_congestion(multi_congestion_info)
+                            delta_theta = self._compute_delta_theta_with_congestion(
+                                grads, eta, clip_norm, momentum, delta_theta_prev, avg_congestion_info
+                            )
+                        else:
+                            delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
+                        
+                        # Apply update
+                        theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
+                        delta_theta_prev = delta_theta.clone()
+                        
+                        # Validate and get improvement
+                        ot_pert, improvement = self._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
+                        
+                        # Update best state
+                        best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
+                        
+                        # Adapt learning rate based on improvement
+                        eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, epoch, no_improvement_count, ot_hist)
+                        
+                        # Check for rollback condition with congestion awareness
+                        if self._check_rollback_condition_with_congestion(ot_hist, no_improvement_count):
+                            if verbose:
+                                print(f"Rollback triggered at epoch {epoch} (no improvement for {no_improvement_count} epochs)")
+                            self._restore_best_state(pert_gen, best_vec)
+                            # Reset parameters after rollback
+                            eta = eta * 0.6
+                            no_improvement_count = 0
+                            delta_theta_prev = torch.zeros_like(delta_theta_prev)
+                        
+                        if verbose:
+                            log_msg = f"[{epoch:2d}] OT(Pert, Evidence)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}"
+                            if multi_congestion_info and multi_congestion_info['domains']:
+                                total_congestion = sum(d['congestion_cost'].item() for d in multi_congestion_info['domains'])
+                                log_msg += f" Total_Congestion={total_congestion:.4f}"
+                            print(log_msg)
+                        
+                        # Early stopping if patience exceeded
+                        if no_improvement_count >= patience:
+                            if verbose:
+                                print(f"Early stopping at epoch {epoch} due to lack of improvement")
+                            break
+                            
+                    except Exception as e:
+                        print(f"Error in perturbation epoch {epoch}: {e}")
+                        if epoch == 0:  # If first epoch fails, re-raise
+                            raise
+                        break
+                
+                # Final restore to best state
+                self._restore_best_state(pert_gen, best_vec)
+                
+                return pert_gen
+                
+            except Exception as e:
+                print(f"Error in perturbation process: {e}")
+                # Return a copy of the original generator as fallback
+                data_dim = self.evidence_list[0].shape[1] if hasattr(self, 'evidence_list') and self.evidence_list else 2
+                return self._create_generator_copy(data_dim)
 
 
 class CTWeightPerturberTargetGiven(CTWeightPerturber):
@@ -438,6 +533,86 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
         # Validate target samples
         if self.target_samples.numel() == 0:
             raise ValueError("Target samples must not be empty.")
+    
+    def _compute_loss_and_grad_with_congestion(self, pert_gen: Generator) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        Compute loss and gradients with full congestion tracking.
+        
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, Dict]: (loss, grads, congestion_info)
+        """
+        pert_gen.train()
+        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        
+        # Use loss function with congestion tracking
+        loss, grads, congestion_info = global_w2_loss_and_grad_with_congestion(
+            pert_gen, 
+            self.target_samples, 
+            noise,
+            critic=self.critic,
+            lambda_congestion=self.config.get('lambda_congestion', 0.1),
+            lambda_sobolev=self.config.get('lambda_sobolev', 0.01),
+            track_congestion=True,
+            use_direct_w2=True,
+            w2_weight=0.7,
+            map_weight=0.3
+        )
+        return loss, grads, congestion_info
+    
+    def _compute_loss_and_grad(self, pert_gen: Generator) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute improved global W2 loss and flattened gradients.
+        
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: (loss, grads)
+        """
+        pert_gen.train()
+        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        
+        # Use improved loss function with hybrid approach
+        loss, grads, _ = global_w2_loss_and_grad_with_congestion(
+            pert_gen, 
+            self.target_samples, 
+            noise,
+            critic=self.critic,
+            track_congestion=False,
+            use_direct_w2=True,
+            w2_weight=0.7,
+            map_weight=0.3
+        )
+        return loss, grads
+    
+    def _validate_and_adapt(self, pert_gen: Generator, eta: float, w2_hist: List[float],
+                            patience: int, verbose: bool, step: int) -> Tuple[float, float]:
+        """
+        Validate perturbation and compute improvement.
+        
+        Args:
+            pert_gen (Generator): Current perturbed generator.
+            eta (float): Current learning rate.
+            w2_hist (List[float]): History of W2 distances.
+            patience (int): Patience for adaptation.
+            verbose (bool): Print flag.
+            step (int): Current step.
+        
+        Returns:
+            Tuple[float, float]: (w2_pert, improvement)
+        """
+        noise_eval = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        
+        with torch.no_grad():
+            orig_out = self.generator(noise_eval)
+            pert_out = pert_gen(noise_eval)
+        
+        # Use tighter blur for more accurate evaluation
+        w2_orig = compute_wasserstein_distance(orig_out, self.target_samples, p=2, blur=0.05)
+        w2_pert = compute_wasserstein_distance(pert_out, self.target_samples, p=2, blur=0.05)
+        
+        # Compute improvement compared to original
+        improvement = w2_orig.item() - w2_pert.item()
+        w2_hist.append(w2_pert.item())
+        
+        return w2_pert.item(), improvement
     
     def perturb(self, steps: int = 80, eta_init: float = 0.008, clip_norm: float = 0.15,
                 momentum: float = 0.85, patience: int = 15, verbose: bool = True) -> Generator:
@@ -571,86 +746,6 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             # Return a copy of the original generator as fallback
             data_dim = self.target_samples.shape[1] if hasattr(self, 'target_samples') else 2
             return self._create_generator_copy(data_dim)
-    
-    def _compute_loss_and_grad_with_congestion(self, pert_gen: Generator) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
-        """
-        Compute loss and gradients with full congestion tracking.
-        
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor, Dict]: (loss, grads, congestion_info)
-        """
-        pert_gen.train()
-        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-        
-        # Use loss function with congestion tracking
-        loss, grads, congestion_info = global_w2_loss_and_grad_with_congestion(
-            pert_gen, 
-            self.target_samples, 
-            noise,
-            critic=self.critic,
-            lambda_congestion=self.config.get('lambda_congestion', 0.1),
-            lambda_sobolev=self.config.get('lambda_sobolev', 0.01),
-            track_congestion=True,
-            use_direct_w2=True,
-            w2_weight=0.7,
-            map_weight=0.3
-        )
-        return loss, grads, congestion_info
-    
-    def _compute_loss_and_grad(self, pert_gen: Generator) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute improved global W2 loss and flattened gradients.
-        
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: (loss, grads)
-        """
-        pert_gen.train()
-        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-        
-        # Use improved loss function with hybrid approach
-        loss, grads, _ = global_w2_loss_and_grad_with_congestion(
-            pert_gen, 
-            self.target_samples, 
-            noise,
-            critic=self.critic,
-            track_congestion=False,
-            use_direct_w2=True,
-            w2_weight=0.7,
-            map_weight=0.3
-        )
-        return loss, grads
-    
-    def _validate_and_adapt(self, pert_gen: Generator, eta: float, w2_hist: List[float],
-                            patience: int, verbose: bool, step: int) -> Tuple[float, float]:
-        """
-        Validate perturbation and compute improvement.
-        
-        Args:
-            pert_gen (Generator): Current perturbed generator.
-            eta (float): Current learning rate.
-            w2_hist (List[float]): History of W2 distances.
-            patience (int): Patience for adaptation.
-            verbose (bool): Print flag.
-            step (int): Current step.
-        
-        Returns:
-            Tuple[float, float]: (w2_pert, improvement)
-        """
-        noise_eval = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-        
-        with torch.no_grad():
-            orig_out = self.generator(noise_eval)
-            pert_out = pert_gen(noise_eval)
-        
-        # Use tighter blur for more accurate evaluation
-        w2_orig = compute_wasserstein_distance(orig_out, self.target_samples, p=2, blur=0.05)
-        w2_pert = compute_wasserstein_distance(pert_out, self.target_samples, p=2, blur=0.05)
-        
-        # Compute improvement compared to original
-        improvement = w2_orig.item() - w2_pert.item()
-        w2_hist.append(w2_pert.item())
-        
-        return w2_pert.item(), improvement
 
 
 class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
@@ -779,41 +874,55 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             if critic is None:
                 continue
                 
-            # Compute spatial density for this evidence domain
-            all_samples = torch.cat([gen_samples, evidence], dim=0)
-            density_info = compute_spatial_density(all_samples, bandwidth=0.15)
-            sigma_gen = density_info['density_at_samples'][:gen_samples.shape[0]]
-            
-            # Compute traffic flow for this domain
-            flow_info = compute_traffic_flow(
-                critic, pert_gen, noise_samples, sigma_gen,
-                lambda_param=self.config.get('lambda_congestion', 0.1)
-            )
-            
-            # Compute congestion cost
-            congestion_cost = congestion_cost_function(
-                flow_info['traffic_intensity'], sigma_gen,
-                lambda_param=self.config.get('lambda_congestion', 0.1)
-            ).mean()
-            
-            domain_info = {
-                'domain_id': i,
-                'spatial_density': sigma_gen,
-                'traffic_flow': flow_info['traffic_flow'],
-                'traffic_intensity': flow_info['traffic_intensity'],
-                'congestion_cost': congestion_cost,
-                'gradient_norm': flow_info['gradient_norm']
-            }
-            
-            multi_congestion_info['domains'].append(domain_info)
-            
-            # Update domain-specific tracker
-            if self.enable_congestion_tracking and i < len(self.multi_congestion_trackers):
-                self.multi_congestion_trackers[i].update({
+            try:
+                # Compute spatial density for this evidence domain
+                all_samples = torch.cat([gen_samples, evidence], dim=0)
+                density_info = compute_spatial_density(all_samples, bandwidth=0.15)
+                sigma_gen = density_info['density_at_samples'][:gen_samples.shape[0]]
+                
+                # Compute traffic flow for this domain
+                flow_info = compute_traffic_flow(
+                    critic, pert_gen, noise_samples, sigma_gen,
+                    lambda_param=self.config.get('lambda_congestion', 0.1)
+                )
+                
+                # Compute congestion cost
+                congestion_cost = congestion_cost_function(
+                    flow_info['traffic_intensity'], sigma_gen,
+                    lambda_param=self.config.get('lambda_congestion', 0.1)
+                ).mean()
+                
+                domain_info = {
+                    'domain_id': i,
+                    'spatial_density': sigma_gen,
+                    'traffic_flow': flow_info['traffic_flow'],
                     'traffic_intensity': flow_info['traffic_intensity'],
                     'congestion_cost': congestion_cost,
-                    'spatial_density': sigma_gen
-                })
+                    'gradient_norm': flow_info['gradient_norm']
+                }
+                
+                multi_congestion_info['domains'].append(domain_info)
+                
+                # Update domain-specific tracker
+                if self.enable_congestion_tracking and i < len(self.multi_congestion_trackers):
+                    self.multi_congestion_trackers[i].update({
+                        'traffic_intensity': flow_info['traffic_intensity'],
+                        'congestion_cost': congestion_cost,
+                        'spatial_density': sigma_gen
+                    })
+            
+            except Exception as e:
+                print(f"Warning: Congestion computation failed for domain {i}: {e}")
+                # Create dummy domain info
+                domain_info = {
+                    'domain_id': i,
+                    'spatial_density': torch.zeros(gen_samples.shape[0], device=gen_samples.device),
+                    'traffic_flow': torch.zeros_like(gen_samples),
+                    'traffic_intensity': torch.zeros(gen_samples.shape[0], device=gen_samples.device),
+                    'congestion_cost': torch.tensor(0.0, device=gen_samples.device),
+                    'gradient_norm': torch.zeros(gen_samples.shape[0], device=gen_samples.device)
+                }
+                multi_congestion_info['domains'].append(domain_info)
         
         return multi_congestion_info
     
@@ -988,6 +1097,49 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         loss.backward()
         grads = torch.cat([p.grad.view(-1) for p in pert_gen.parameters() if p.grad is not None])
         return loss, grads
+    
+    def _validate_and_adapt(self, pert_gen: Generator, virtual_samples: torch.Tensor, eta: float,
+                            ot_hist: List[float], patience: int, verbose: bool, epoch: int) -> Tuple[float, float]:
+        """
+        Validate perturbation and compute improvement in multi-marginal case.
+        
+        Args:
+            pert_gen (Generator): Current perturbed generator.
+            virtual_samples (torch.Tensor): Current virtual target samples.
+            eta (float): Current learning rate.
+            ot_hist (List[float]): History of OT losses.
+            patience (int): Patience for adaptation.
+            verbose (bool): Print flag.
+            epoch (int): Current epoch.
+        
+        Returns:
+            Tuple[float, float]: (ot_pert, improvement)
+        """
+        noise_eval = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        
+        with torch.no_grad():
+            orig_out = self.generator(noise_eval)
+            pert_out = pert_gen(noise_eval)
+
+        ot_orig = multi_marginal_ot_loss(
+            orig_out, self.evidence_list, virtual_samples,
+            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
+            lambda_multi=self.config.get('lambda_multi', 1.0),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012)
+        ).item()
+
+        ot_pert = multi_marginal_ot_loss(
+            pert_out, self.evidence_list, virtual_samples,
+            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
+            lambda_multi=self.config.get('lambda_multi', 1.0),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012)
+        ).item()
+        
+        # Compute improvement compared to original (lower is better for OT loss)
+        improvement = ot_orig - ot_pert
+        ot_hist.append(ot_pert)
+        
+        return ot_pert, improvement
 
 
 CongestionAwareWeightPerturberTargetGiven = CTWeightPerturberTargetGiven
