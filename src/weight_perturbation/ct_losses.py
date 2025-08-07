@@ -212,9 +212,13 @@ def multi_marginal_ot_loss_with_congestion(
             sigma_gen = density_info['density_at_samples'][:generator_outputs.shape[0]]
             
             # Compute traffic flow for this domain
-            noise_dummy = torch.randn(generator_outputs.shape[0], 2, device=generator_outputs.device)
+            def dummy_generator(z):
+                return generator_outputs
+            
             flow_info = compute_traffic_flow(
-                critic, lambda z: generator_outputs, noise_dummy, sigma_gen, lambda_congestion
+                critic, dummy_generator, 
+                torch.randn(generator_outputs.shape[0], 2, device=generator_outputs.device), 
+                sigma_gen, lambda_congestion
             )
             
             # Compute congestion cost

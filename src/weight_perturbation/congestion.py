@@ -32,23 +32,23 @@ class CongestionTracker:
             'congestion_cost': [],
             'flow_divergence': [],
             'continuity_residual': [],
-            'spatial_density': []
+            'spatial_density': [],
+            'gradient_norm': [],
+            'sobolev_loss': []
         }
         
     def update(self, congestion_info: Dict[str, torch.Tensor]) -> None:
         """Update congestion history with new measurements."""
-        if 'traffic_intensity' in congestion_info:
-            self.history['traffic_intensity'].append(
-                congestion_info['traffic_intensity'].mean().item()
-            )
-        if 'congestion_cost' in congestion_info:
-            self.history['congestion_cost'].append(
-                congestion_info['congestion_cost'].item()
-            )
-        if 'spatial_density' in congestion_info:
-            self.history['spatial_density'].append(
-                congestion_info['spatial_density'].mean().item()
-            )
+        for key in ['traffic_intensity', 'congestion_cost', 'spatial_density', 'gradient_norm', 'sobolev_loss']:
+            if key in congestion_info:
+                if isinstance(congestion_info[key], torch.Tensor):
+                    if congestion_info[key].dim() == 0:  # Scalar
+                        value = congestion_info[key].item()
+                    else:  # Vector - take mean
+                        value = congestion_info[key].mean().item()
+                else:
+                    value = float(congestion_info[key])
+                self.history[key].append(value)
             
         # Maintain history size
         for key in self.history:
@@ -72,6 +72,18 @@ class CongestionTracker:
         
         window = min(window, len(self.history['congestion_cost']))
         return sum(self.history['congestion_cost'][-window:]) / window
+    
+    def get_statistics(self) -> Dict[str, float]:
+        """Get comprehensive statistics."""
+        stats = {}
+        for key, values in self.history.items():
+            if values:
+                stats[f'{key}_mean'] = np.mean(values)
+                stats[f'{key}_std'] = np.std(values)
+                stats[f'{key}_latest'] = values[-1]
+                if len(values) >= 3:
+                    stats[f'{key}_trend'] = np.mean(values[-3:]) - np.mean(values[-6:-3]) if len(values) >= 6 else 0
+        return stats
 
 
 def compute_spatial_density(
@@ -103,6 +115,9 @@ def compute_spatial_density(
     device = samples.device
     n_samples, data_dim = samples.shape
     
+    if n_samples == 0:
+        raise ValueError("Samples tensor cannot be empty")
+    
     # Determine domain bounds
     if domain_bounds is None:
         mins = samples.min(dim=0)[0] - 3 * bandwidth
@@ -125,26 +140,33 @@ def compute_spatial_density(
     density_at_grid = torch.zeros(grid_points.shape[0], device=device)
     density_at_samples = torch.zeros(n_samples, device=device)
     
-    # Gaussian kernel
+    # Gaussian kernel with numerical stability
     def gaussian_kernel(x, y, bandwidth):
         dist_sq = ((x - y) ** 2).sum(dim=-1)
-        return torch.exp(-dist_sq / (2 * bandwidth ** 2)) / ((2 * np.pi * bandwidth ** 2) ** (data_dim / 2))
+        normalization = (2 * np.pi * bandwidth ** 2) ** (data_dim / 2)
+        return torch.exp(-dist_sq / (2 * bandwidth ** 2)) / normalization
     
     # Compute density at grid points
     for i in range(n_samples):
         density_at_grid += gaussian_kernel(grid_points, samples[i:i+1], bandwidth)
     density_at_grid /= n_samples
     
-    # Compute density at sample points (leave-one-out)
+    # Compute density at sample points (leave-one-out for unbiased estimate)
     for i in range(n_samples):
-        mask = torch.ones(n_samples, dtype=torch.bool, device=device)
-        mask[i] = False
-        other_samples = samples[mask]
-        density_at_samples[i] = gaussian_kernel(samples[i:i+1], other_samples, bandwidth).sum() / (n_samples - 1)
+        if n_samples > 1:
+            mask = torch.ones(n_samples, dtype=torch.bool, device=device)
+            mask[i] = False
+            other_samples = samples[mask]
+            if other_samples.shape[0] > 0:
+                density_at_samples[i] = gaussian_kernel(samples[i:i+1], other_samples, bandwidth).sum() / (n_samples - 1)
+            else:
+                density_at_samples[i] = gaussian_kernel(samples[i:i+1], samples[i:i+1], bandwidth).sum()
+        else:
+            density_at_samples[i] = gaussian_kernel(samples[i:i+1], samples[i:i+1], bandwidth).sum()
     
     # Add small epsilon to avoid division by zero
-    density_at_samples = density_at_samples + 1e-8
-    density_at_grid = density_at_grid + 1e-8
+    density_at_samples = torch.clamp(density_at_samples + 1e-8, min=1e-8)
+    density_at_grid = torch.clamp(density_at_grid + 1e-8, min=1e-8)
     
     return {
         'density_at_samples': density_at_samples,
@@ -191,16 +213,26 @@ def compute_traffic_flow(
     # Enable gradients for critic computation
     gen_samples.requires_grad_(True)
     
-    # Compute critic values
-    critic_values = critic(gen_samples)
-    
-    # Compute gradients with respect to generated samples
-    critic_gradients = torch.autograd.grad(
-        outputs=critic_values.sum(),
-        inputs=gen_samples,
-        create_graph=True,
-        retain_graph=True
-    )[0]
+    try:
+        # Compute critic values
+        critic_values = critic(gen_samples)
+        
+        # Compute gradients with respect to generated samples
+        critic_gradients = torch.autograd.grad(
+            outputs=critic_values.sum(),
+            inputs=gen_samples,
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True
+        )[0]
+        
+        if critic_gradients is None:
+            # Fallback: create dummy gradients
+            critic_gradients = torch.zeros_like(gen_samples)
+        
+    except RuntimeError as e:
+        print(f"Warning: Gradient computation failed: {e}")
+        critic_gradients = torch.zeros_like(gen_samples)
     
     # Compute gradient norm
     gradient_norm = torch.norm(critic_gradients, p=2, dim=1, keepdim=True)
@@ -211,8 +243,12 @@ def compute_traffic_flow(
     # Compute (|∇u| - 1)_+ 
     gradient_excess = F.relu(gradient_norm - 1.0)
     
+    # Ensure sigma has correct shape
+    if sigma.dim() == 1:
+        sigma = sigma.unsqueeze(1)
+    
     # Compute traffic flow: w_Q = -λσ(|∇u| - 1)_+ ∇u/|∇u|
-    traffic_flow = -lambda_param * sigma.unsqueeze(1) * gradient_excess * (critic_gradients / gradient_norm_safe)
+    traffic_flow = -lambda_param * sigma * gradient_excess * (critic_gradients / gradient_norm_safe)
     
     # Compute traffic intensity: i_Q = |w_Q|
     traffic_intensity = torch.norm(traffic_flow, p=2, dim=1)
@@ -372,14 +408,18 @@ def verify_continuity_equation(
     div = torch.zeros(nx, ny, device=flow.device)
     
     # ∂w_x/∂x
-    div[1:-1, :] += (flow_grid[2:, :, 0] - flow_grid[:-2, :, 0]) / (2 * dx)
-    div[0, :] = (flow_grid[1, :, 0] - flow_grid[0, :, 0]) / dx
-    div[-1, :] = (flow_grid[-1, :, 0] - flow_grid[-2, :, 0]) / dx
+    if nx > 2:
+        div[1:-1, :] += (flow_grid[2:, :, 0] - flow_grid[:-2, :, 0]) / (2 * dx)
+    if nx > 1:
+        div[0, :] = (flow_grid[1, :, 0] - flow_grid[0, :, 0]) / dx
+        div[-1, :] = (flow_grid[-1, :, 0] - flow_grid[-2, :, 0]) / dx
     
     # ∂w_y/∂y
-    div[:, 1:-1] += (flow_grid[:, 2:, 1] - flow_grid[:, :-2, 1]) / (2 * dy)
-    div[:, 0] += (flow_grid[:, 1, 1] - flow_grid[:, 0, 1]) / dy
-    div[:, -1] += (flow_grid[:, -1, 1] - flow_grid[:, -2, 1]) / dy
+    if ny > 2:
+        div[:, 1:-1] += (flow_grid[:, 2:, 1] - flow_grid[:, :-2, 1]) / (2 * dy)
+    if ny > 1:
+        div[:, 0] += (flow_grid[:, 1, 1] - flow_grid[:, 0, 1]) / dy
+        div[:, -1] += (flow_grid[:, -1, 1] - flow_grid[:, -2, 1]) / dy
     
     div_flat = div.flatten()
     
@@ -396,3 +436,32 @@ def verify_continuity_equation(
         'max_violation': max_violation,
         'is_satisfied': is_satisfied
     }
+
+
+def estimate_congestion_bound(
+    traffic_intensity: torch.Tensor,
+    sigma: torch.Tensor,
+    percentile: float = 95.0
+) -> float:
+    """
+    Estimate appropriate congestion bound based on traffic intensity distribution.
+    
+    Args:
+        traffic_intensity (torch.Tensor): Current traffic intensity values.
+        sigma (torch.Tensor): Spatial density values.
+        percentile (float): Percentile for bound estimation.
+    
+    Returns:
+        float: Estimated congestion bound.
+    """
+    # Weighted intensity by spatial density
+    weighted_intensity = traffic_intensity * sigma
+    
+    if weighted_intensity.numel() == 0:
+        return 0.1  # Default bound
+    
+    # Use percentile-based bound
+    bound = torch.quantile(weighted_intensity, percentile / 100.0).item()
+    
+    # Ensure reasonable bounds
+    return max(0.01, min(1.0, bound))

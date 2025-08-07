@@ -21,7 +21,7 @@ from .congestion import (
     congestion_cost_function
 )
 from .sobolev import SobolevConstrainedCritic, sobolev_regularization
-from .congestion_losses import (
+from .ct_losses import (
     global_w2_loss_and_grad_with_congestion,
     multi_marginal_ot_loss_with_congestion,
     CongestionAwareLossFunction,
@@ -539,7 +539,7 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
                     
                     if verbose:
                         log_msg = f"[{step:2d}] W2(Pert, Target)={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.6f}"
-                        if self.enable_congestion_tracking and congestion_info:
+                        if self.enable_congestion_tracking and 'congestion_info' in locals() and congestion_info:
                             log_msg += f" Congestion={congestion_info.get('congestion_cost', 0):.4f}"
                         print(log_msg)
                     
@@ -718,6 +718,46 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         }
         return config
     
+    def _estimate_virtual_target_with_congestion(
+        self, evidence_list: List[torch.Tensor], epoch: int
+    ) -> torch.Tensor:
+        """
+        Estimate virtual target with congestion awareness.
+        
+        Args:
+            evidence_list (List[torch.Tensor]): Evidence domains.
+            epoch (int): Current epoch for adaptation.
+            
+        Returns:
+            torch.Tensor: Virtual target samples.
+        """
+        # Adaptive bandwidth based on congestion levels
+        base_bandwidth = 0.22
+        if self.enable_congestion_tracking and self.multi_congestion_trackers:
+            avg_congestion = np.mean([
+                tracker.get_average_congestion() 
+                for tracker in self.multi_congestion_trackers
+                if len(tracker.history['congestion_cost']) > 0
+            ])
+            if avg_congestion > 0:
+                # Increase bandwidth in high congestion to promote exploration
+                bandwidth = base_bandwidth * (1.0 + 0.5 * avg_congestion)
+            else:
+                bandwidth = base_bandwidth
+        else:
+            bandwidth = base_bandwidth
+        
+        # Time-based annealing
+        bandwidth += 0.07 * torch.exp(torch.tensor(-epoch / 10.0)).item()
+        
+        virtuals = virtual_target_sampler(
+            evidence_list, 
+            bandwidth=bandwidth, 
+            num_samples=self.eval_batch_size, 
+            device=self.device
+        )
+        return virtuals
+    
     def _compute_multi_marginal_congestion(self, pert_gen: Generator, 
                                           noise_samples: torch.Tensor) -> Dict[str, List[Dict]]:
         """
@@ -764,6 +804,191 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 'congestion_cost': congestion_cost,
                 'gradient_norm': flow_info['gradient_norm']
             }
+            
+            multi_congestion_info['domains'].append(domain_info)
+            
+            # Update domain-specific tracker
+            if self.enable_congestion_tracking and i < len(self.multi_congestion_trackers):
+                self.multi_congestion_trackers[i].update({
+                    'traffic_intensity': flow_info['traffic_intensity'],
+                    'congestion_cost': congestion_cost,
+                    'spatial_density': sigma_gen
+                })
+        
+        return multi_congestion_info
+    
+    def _average_multi_marginal_congestion(self, multi_congestion_info: Dict) -> Dict:
+        """
+        Average congestion information across domains.
+        
+        Args:
+            multi_congestion_info (Dict): Multi-domain congestion info.
+            
+        Returns:
+            Dict: Averaged congestion information.
+        """
+        if 'domains' not in multi_congestion_info or not multi_congestion_info['domains']:
+            return {}
+        
+        domains = multi_congestion_info['domains']
+        avg_info = {}
+        
+        # Average traffic intensity
+        all_intensities = [d['traffic_intensity'] for d in domains]
+        avg_info['traffic_intensity'] = torch.stack(all_intensities).mean(dim=0)
+        
+        # Average spatial density
+        all_densities = [d['spatial_density'] for d in domains]
+        avg_info['spatial_density'] = torch.stack(all_densities).mean(dim=0)
+        
+        # Average congestion cost
+        avg_info['congestion_cost'] = torch.stack([d['congestion_cost'] for d in domains]).mean()
+        
+        return avg_info
+    
+    def perturb(self, epochs: int = 100, eta_init: float = 0.045, clip_norm: float = 0.23,
+                momentum: float = 0.975, patience: int = 6, lambda_entropy: float = 0.012,
+                lambda_virtual: float = 0.8, lambda_multi: float = 1.0, verbose: bool = True) -> Generator:
+        """
+        Perform the perturbation process for evidence-based case with congestion tracking.
+        
+        Args:
+            epochs (int): Number of perturbation epochs. Defaults to 100.
+            eta_init (float): Initial learning rate. Defaults to 0.045.
+            clip_norm (float): Gradient clipping norm. Defaults to 0.23.
+            momentum (float): Momentum factor. Defaults to 0.975.
+            patience (int): Maximum patience before stopping. Defaults to 6.
+            lambda_entropy (float): Entropy regularization coefficient. Defaults to 0.012.
+            lambda_virtual (float): Coefficient for virtual target OT. Defaults to 0.8.
+            lambda_multi (float): Coefficient for multi-marginal evidence OT. Defaults to 1.0.
+            verbose (bool): If True, print progress. Defaults to True.
+        
+        Returns:
+            Generator: Perturbed generator model.
+        """
+        try:
+            data_dim = self.evidence_list[0].shape[1]
+            pert_gen = self._create_generator_copy(data_dim)
+            
+            # Initialize perturbation state
+            theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+            
+            if theta_prev.numel() == 0:
+                raise RuntimeError("Generated generator has no parameters.")
+                
+            delta_theta_prev = torch.zeros_like(theta_prev)
+            eta = eta_init
+            ot_hist = []
+            best_vec = None
+            best_ot = float('inf')
+            no_improvement_count = 0
+            
+            for epoch in range(epochs):
+                try:
+                    # Estimate virtual target with congestion awareness
+                    virtual_samples = self._estimate_virtual_target_with_congestion(
+                        self.evidence_list, epoch
+                    )
+                    
+                    # Generate noise for this epoch
+                    noise_samples = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+                    
+                    # Compute multi-marginal congestion if enabled
+                    multi_congestion_info = None
+                    if self.enable_congestion_tracking and self.critics:
+                        multi_congestion_info = self._compute_multi_marginal_congestion(pert_gen, noise_samples)
+                    
+                    # Compute multi-marginal OT loss and gradients
+                    loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy, lambda_virtual, lambda_multi)
+                    
+                    # Compute delta_theta with multi-marginal congestion awareness
+                    if multi_congestion_info and multi_congestion_info['domains']:
+                        avg_congestion_info = self._average_multi_marginal_congestion(multi_congestion_info)
+                        delta_theta = self._compute_delta_theta_with_congestion(
+                            grads, eta, clip_norm, momentum, delta_theta_prev, avg_congestion_info
+                        )
+                    else:
+                        delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
+                    
+                    # Apply update
+                    theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
+                    delta_theta_prev = delta_theta.clone()
+                    
+                    # Validate and get improvement
+                    ot_pert, improvement = self._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
+                    
+                    # Update best state
+                    best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
+                    
+                    # Adapt learning rate based on improvement
+                    eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, epoch, no_improvement_count, ot_hist)
+                    
+                    # Check for rollback condition with congestion awareness
+                    if self._check_rollback_condition_with_congestion(ot_hist, no_improvement_count):
+                        if verbose:
+                            print(f"Rollback triggered at epoch {epoch} (no improvement for {no_improvement_count} epochs)")
+                        self._restore_best_state(pert_gen, best_vec)
+                        # Reset parameters after rollback
+                        eta = eta * 0.6
+                        no_improvement_count = 0
+                        delta_theta_prev = torch.zeros_like(delta_theta_prev)
+                    
+                    if verbose:
+                        log_msg = f"[{epoch:2d}] OT(Pert, Evidence)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}"
+                        if multi_congestion_info and multi_congestion_info['domains']:
+                            total_congestion = sum(d['congestion_cost'].item() for d in multi_congestion_info['domains'])
+                            log_msg += f" Total_Congestion={total_congestion:.4f}"
+                        print(log_msg)
+                    
+                    # Early stopping if patience exceeded
+                    if no_improvement_count >= patience:
+                        if verbose:
+                            print(f"Early stopping at epoch {epoch} due to lack of improvement")
+                        break
+                        
+                except Exception as e:
+                    print(f"Error in perturbation epoch {epoch}: {e}")
+                    if epoch == 0:  # If first epoch fails, re-raise
+                        raise
+                    break
+            
+            # Final restore to best state
+            self._restore_best_state(pert_gen, best_vec)
+            
+            return pert_gen
+            
+        except Exception as e:
+            print(f"Error in perturbation process: {e}")
+            # Return a copy of the original generator as fallback
+            data_dim = self.evidence_list[0].shape[1] if hasattr(self, 'evidence_list') and self.evidence_list else 2
+            return self._create_generator_copy(data_dim)
+    
+    def _compute_loss_and_grad(self, pert_gen: Generator, virtual_samples: torch.Tensor,
+                               lambda_entropy: float, lambda_virtual: float, lambda_multi: float
+                               ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute multi-marginal OT loss and flattened gradients.
+        
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: (loss, grads)
+        """
+        pert_gen.train()
+        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        gen_out = pert_gen(noise)
+        
+        loss = multi_marginal_ot_loss(
+            gen_out, self.evidence_list, virtual_samples,
+            blur=0.06,
+            lambda_virtual=lambda_virtual,
+            lambda_multi=lambda_multi,
+            lambda_entropy=lambda_entropy
+        )
+        
+        pert_gen.zero_grad()
+        loss.backward()
+        grads = torch.cat([p.grad.view(-1) for p in pert_gen.parameters() if p.grad is not None])
+        return loss, grads
+
 
 CongestionAwareWeightPerturberTargetGiven = CTWeightPerturberTargetGiven
 CongestionAwareWeightPerturberTargetNotGiven = CTWeightPerturberTargetNotGiven
