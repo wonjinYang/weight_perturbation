@@ -119,7 +119,7 @@ log_summary "Running src/examples/example_section3.py..."
 if [ -f "src/examples/example_section3.py" ]; then
     # Set matplotlib backend to prevent GUI issues
     export MPLBACKEND=Agg
-    python src/examples/example_section3.py --plot --verbose --num_evidence_domains=4 > $EXAMPLE3_LOG 2>&1
+    python src/examples/example_section3.py --plot --verbose > $EXAMPLE3_LOG 2>&1
     if [ $? -ne 0 ]; then
         log_summary "ERROR: src/examples/example_section3.py failed. See $EXAMPLE3_LOG for details."
     else

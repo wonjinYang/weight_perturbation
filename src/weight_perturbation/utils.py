@@ -6,8 +6,12 @@ import numpy as np
 
 # Handle matplotlib backend before importing pyplot
 import matplotlib
-if 'DISPLAY' not in os.environ or os.environ.get('MPLBACKEND') == 'Agg':
+# Set backend for headless environments
+if os.environ.get('MPLBACKEND'):
+    matplotlib.use(os.environ.get('MPLBACKEND'))
+elif 'DISPLAY' not in os.environ:
     matplotlib.use('Agg')  # Use non-interactive backend for headless environments
+
 import matplotlib.pyplot as plt
 
 def parameters_to_vector(parameters: Iterable[torch.Tensor]) -> torch.Tensor:
@@ -223,12 +227,12 @@ def load_config(config_path: str = 'configs/default.yaml') -> Dict[str, Any]:
         'noise_dim': 2,
         'data_dim': 2,
         'hidden_dim': 256,
-        'eta_init': 0.017,
-        'clip_norm': 0.12,
-        'momentum': 0.91,
-        'patience': 7,
+        'eta_init': 0.045,
+        'clip_norm': 0.4,
+        'momentum': 0.95,
+        'patience': 15,
         'lambda_entropy': 0.012,
-        'eval_batch_size': 1600,
+        'eval_batch_size': 600,
     }
     
     for key, val in defaults.items():

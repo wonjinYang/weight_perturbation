@@ -71,13 +71,11 @@ try:
         SobolevConstrainedCritic,
         compute_sobolev_gradient_penalty,
         SobolevWGANLoss,
-        apply_spectral_norm
     )
     
     # loss functions with congestion tracking
     from .ct_losses import (
         global_w2_loss_and_grad_with_congestion,
-        multi_marginal_ot_loss_with_congestion,
         CongestionAwareLossFunction,
         compute_convergence_metrics
     )
@@ -95,9 +93,8 @@ try:
     _THEORETICAL_COMPONENTS_AVAILABLE = True
     
 except ImportError as e:
+    print(e)
     _THEORETICAL_COMPONENTS_AVAILABLE = False
-    print(f"Note: Advanced theoretical components not available: {e}")
-    print("Only basic weight perturbation functionality is enabled.")
 
 # Package metadata
 __version__ = '0.2.0'
@@ -144,11 +141,9 @@ if _THEORETICAL_COMPONENTS_AVAILABLE:
         'WeightedSobolevRegularizer', 'AdaptiveSobolevRegularizer',
         'sobolev_regularization', 'SobolevConstrainedCritic',
         'compute_sobolev_gradient_penalty', 'SobolevWGANLoss',
-        'apply_spectral_norm',
         
         # Advanced losses
         'global_w2_loss_and_grad_with_congestion',
-        'multi_marginal_ot_loss_with_congestion',
         'CongestionAwareLossFunction', 'compute_convergence_metrics',
         
         # Advanced perturbation

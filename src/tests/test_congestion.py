@@ -1,7 +1,7 @@
 """
 Complete Congestion Tracking and Traffic Flow Visualization Example
 
-This comprehensive example demonstrates:
+This example demonstrates:
 1. Spatial density estimation σ(x)
 2. Traffic flow computation w_Q with vector directions
 3. Traffic intensity i_Q visualization
@@ -12,1087 +12,778 @@ This comprehensive example demonstrates:
 """
 
 import torch
-import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable
 import seaborn as sns
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 import argparse
+import logging
+
+from weight_perturbation import (
+    _THEORETICAL_COMPONENTS_AVAILABLE,
+    check_theoretical_support,
+    compute_spatial_density,
+    compute_traffic_flow,
+    set_seed,
+    compute_device,
+    sample_real_data,
+    pretrain_wgan_gp,
+    sample_evidence_domains,
+    Generator,
+    SobolevConstrainedCritic,
+    CTWeightPerturberTargetNotGiven,
+)
 
 # Set up plotting style
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+
 class CongestedTransportVisualizer:
     """
     Comprehensive visualizer for congested transport theory.
+
+    Args:
+        figsize (tuple): Figure size for plots.
+        save_dir (str): Directory to save visualizations.
     """
-    
-    def __init__(self, figsize=(18, 12), save_dir="congestion_analysis"):
+
+    def __init__(self, num_domains=3, figsize=(18, 12), save_dir="test_results/plots/congestion_analysis"):
+        self.num_domains = num_domains
         self.figsize = figsize
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
-        
-        self.step_data = []
-        
-    def visualize_congested_transport_step(self, step, generator, critic, target_samples, 
-                                         noise_samples, lambda_congestion=0.1, save=True):
+        self.epoch_data = []
+        self.domain_colors = sns.color_palette("husl", n_colors=num_domains)
+
+    def visualize_congested_transport_step(self, epoch, generator, critics, evidence_list,
+                                           virtual_samples, noise_samples, multi_congestion_info=None, save=True):
         """
-        Complete congested transport visualization for a single step.
+        Visualize multi-marginal traffic flow for a single epoch.
+
+        Args:
+            epoch (int): Current epoch number.
+            generator (torch.nn.Module): Generator model.
+            critics (list): List of critic models for each domain.
+            evidence_list (list): List of evidence samples for each domain.
+            virtual_samples (torch.Tensor): Virtual target samples.
+            noise_samples (torch.Tensor): Noise samples for generation.
+            multi_congestion_info (dict, optional): Multi-domain congestion information.
+            save (bool): Whether to save the plot.
+
+        Returns:
+            dict: Epoch data including samples and flow information.
         """
+
         device = next(generator.parameters()).device
-        
+
         # Generate samples from current generator
         with torch.no_grad():
             gen_samples = generator(noise_samples)
-        
-        # 1. Compute spatial density σ(x)
-        density_info = self._compute_spatial_density(gen_samples, bandwidth=0.12)
-        sigma = density_info['density_at_samples']
-        
-        # 2. Compute traffic flow w_Q and intensity i_Q
-        flow_info = self._compute_traffic_flow(
-            critic, generator, noise_samples, sigma, lambda_congestion
-        )
-        
-        # 3. Compute congestion cost H(x, i_Q)
-        congestion_cost = self._compute_congestion_cost(
-            flow_info['traffic_intensity'], sigma, lambda_congestion
-        )
-        
-        # 4. Verify continuity equation (simplified)
-        continuity_residual = self._verify_continuity_equation(
-            flow_info['traffic_flow'], gen_samples
-        )
-        
-        # Store step data
-        step_data = {
-            'step': step,
-            'gen_samples': gen_samples.cpu().numpy(),
-            'target_samples': target_samples.cpu().numpy(),
-            'traffic_flow': flow_info['traffic_flow'].cpu().numpy(),
-            'traffic_intensity': flow_info['traffic_intensity'].cpu().numpy(),
-            'spatial_density': sigma.cpu().numpy(),
-            'gradient_norm': flow_info['gradient_norm'].cpu().numpy(),
-            'congestion_cost': congestion_cost.mean().item(),
-            'continuity_residual': continuity_residual
+
+        # Compute flow information for each domain
+        domain_flows = []
+        domain_densities = []
+        for i, (evidence, critic) in enumerate(zip(evidence_list, critics)):
+            if critic is None:
+                continue
+
+            # Compute spatial density for this domain
+            all_samples = torch.cat([gen_samples, evidence], dim=0)
+            density_info = compute_spatial_density(all_samples, bandwidth=0.15)
+            sigma_gen = density_info['density_at_samples'][:gen_samples.shape[0]]
+
+            # Compute traffic flow for this domain
+            flow_info = compute_traffic_flow(
+                critic, generator, noise_samples, sigma_gen, lambda_param=0.1
+            )
+
+            domain_flows.append({
+                'domain_id': i,
+                'flow': flow_info['traffic_flow'].detach().cpu().numpy(),
+                'intensity': flow_info['traffic_intensity'].detach().cpu().numpy(),
+                'density': sigma_gen.detach().cpu().numpy(),
+                'gradient_norm': flow_info['gradient_norm'].detach().cpu().numpy(),
+                'evidence': evidence.detach().cpu().numpy()
+            })
+            domain_densities.append(sigma_gen.detach().cpu().numpy())
+
+        # Store epoch data
+        epoch_data = {
+            'epoch': epoch,
+            'gen_samples': gen_samples.detach().cpu().numpy(),
+            'virtual_samples': virtual_samples.detach().cpu().numpy(),
+            'evidence_list': [ev.detach().cpu().numpy() for ev in evidence_list],
+            'domain_flows': domain_flows,
+            'multi_congestion_info': multi_congestion_info
         }
-        self.step_data.append(step_data)
-        
+        self.epoch_data.append(epoch_data)
+
         # Create comprehensive visualization
-        self._create_comprehensive_plot(step_data, save)
-        
-        return step_data
-    
-    def _compute_spatial_density(self, samples, bandwidth=0.1):
-        """Compute spatial density σ(x) using KDE."""
-        device = samples.device
-        n_samples, data_dim = samples.shape
-        
-        # Simple KDE implementation
-        density_at_samples = torch.zeros(n_samples, device=device)
-        
-        for i in range(n_samples):
-            distances = torch.norm(samples - samples[i:i+1], dim=1)
-            kernels = torch.exp(-distances**2 / (2 * bandwidth**2))
-            density_at_samples[i] = kernels.sum() / (n_samples * bandwidth * np.sqrt(2 * np.pi))
-        
-        # Add small epsilon to avoid division by zero
-        density_at_samples = density_at_samples + 1e-8
-        
-        return {
-            'density_at_samples': density_at_samples,
-            'bandwidth': bandwidth
-        }
-    
-    def _compute_traffic_flow(self, critic, generator, noise_samples, sigma, lambda_param):
-        """Compute traffic flow w_Q based on critic gradients."""
-        generator.eval()
-        critic.eval()
-        
-        # Generate samples with gradients
-        with torch.no_grad():
-            gen_samples = generator(noise_samples)
-        
-        gen_samples.requires_grad_(True)
-        
-        # Compute critic values and gradients
-        critic_values = critic(gen_samples)
-        
-        critic_gradients = torch.autograd.grad(
-            outputs=critic_values.sum(),
-            inputs=gen_samples,
-            create_graph=True,
-            retain_graph=True
-        )[0]
-        
-        # Compute gradient norm
-        gradient_norm = torch.norm(critic_gradients, p=2, dim=1, keepdim=True)
-        gradient_norm_safe = torch.clamp(gradient_norm, min=1e-8)
-        
-        # Compute (|∇u| - 1)_+
-        gradient_excess = torch.relu(gradient_norm - 1.0)
-        
-        # Compute traffic flow: w_Q = -λσ(|∇u| - 1)_+ ∇u/|∇u|
-        traffic_flow = -lambda_param * sigma.unsqueeze(1) * gradient_excess * (
-            critic_gradients / gradient_norm_safe
-        )
-        
-        # Compute traffic intensity: i_Q = |w_Q|
-        traffic_intensity = torch.norm(traffic_flow, p=2, dim=1)
-        
-        return {
-            'traffic_flow': traffic_flow,
-            'traffic_intensity': traffic_intensity,
-            'critic_gradients': critic_gradients,
-            'gradient_norm': gradient_norm.squeeze()
-        }
-    
-    def _compute_congestion_cost(self, traffic_intensity, sigma, lambda_param):
-        """Compute congestion cost H(x, i) = (1/2λσ)i² + |i|."""
-        sigma_safe = torch.clamp(sigma, min=1e-8)
-        quadratic_term = traffic_intensity ** 2 / (2 * lambda_param * sigma_safe)
-        linear_term = torch.abs(traffic_intensity)
-        return quadratic_term + linear_term
-    
-    def _verify_continuity_equation(self, traffic_flow, samples):
-        """Simple verification of continuity equation ∂_t ρ + ∇·w = 0."""
-        # Simplified: compute divergence magnitude as proxy
-        if samples.shape[1] == 2:  # 2D case
-            # Approximate divergence using finite differences
-            flow_x, flow_y = traffic_flow[:, 0], traffic_flow[:, 1]
-            
-            # Simple divergence estimate
-            divergence_estimate = torch.std(flow_x) + torch.std(flow_y)
-            return divergence_estimate.item()
-        return 0.0
-    
-    def _create_comprehensive_plot(self, step_data, save=True):
-        """Create comprehensive congested transport visualization."""
         fig = plt.figure(figsize=self.figsize)
         gs = fig.add_gridspec(3, 4, hspace=0.3, wspace=0.3)
-        
-        step = step_data['step']
-        fig.suptitle(f'Congested Transport Analysis - Step {step}', 
-                    fontsize=18, fontweight='bold')
-        
-        # Plot 1: Generated vs Target samples
-        ax1 = fig.add_subplot(gs[0, 0])
-        gen_samples = step_data['gen_samples']
-        target_samples = step_data['target_samples']
-        
-        ax1.scatter(gen_samples[:, 0], gen_samples[:, 1], 
-                   c='blue', alpha=0.6, s=30, label='Generated')
-        ax1.scatter(target_samples[:, 0], target_samples[:, 1], 
-                   c='red', alpha=0.6, s=30, label='Target')
-        ax1.set_title('Generated vs Target Samples')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_xlabel('X₁')
-        ax1.set_ylabel('X₂')
-        
-        # Plot 2: Traffic Flow Vector Field
-        ax2 = fig.add_subplot(gs[0, 1])
-        traffic_flow = step_data['traffic_flow']
-        traffic_intensity = step_data['traffic_intensity']
-        
-        # Subsample for cleaner visualization
-        n_points = min(80, len(gen_samples))
-        indices = np.random.choice(len(gen_samples), n_points, replace=False)
-        
-        quiver = ax2.quiver(
-            gen_samples[indices, 0], gen_samples[indices, 1],
-            traffic_flow[indices, 0], traffic_flow[indices, 1],
-            traffic_intensity[indices],
-            cmap='viridis', scale=2.0, scale_units='xy', angles='xy',
-            width=0.003, alpha=0.8
-        )
-        
-        cbar = plt.colorbar(quiver, ax=ax2, shrink=0.8)
-        cbar.set_label('Traffic Intensity |w_Q|')
-        
-        ax2.set_title('Traffic Flow Vector Field w_Q(x)')
-        ax2.set_xlabel('X₁')
-        ax2.set_ylabel('X₂')
-        ax2.grid(True, alpha=0.3)
-        
-        # Add target samples as reference
-        ax2.scatter(target_samples[:, 0], target_samples[:, 1], 
-                   c='red', alpha=0.3, s=15, marker='x', label='Target')
-        ax2.legend()
-        
-        # Plot 3: Traffic Intensity Heatmap
-        ax3 = fig.add_subplot(gs[0, 2])
-        scatter = ax3.scatter(gen_samples[:, 0], gen_samples[:, 1], 
-                            c=traffic_intensity, cmap='plasma', s=50, alpha=0.7)
-        cbar3 = plt.colorbar(scatter, ax=ax3, shrink=0.8)
-        cbar3.set_label('Traffic Intensity i_Q(x)')
-        ax3.set_title('Traffic Intensity Distribution')
-        ax3.set_xlabel('X₁')
-        ax3.set_ylabel('X₂')
-        ax3.grid(True, alpha=0.3)
-        
-        # Plot 4: Spatial Density Distribution
-        ax4 = fig.add_subplot(gs[0, 3])
-        spatial_density = step_data['spatial_density']
-        density_scatter = ax4.scatter(gen_samples[:, 0], gen_samples[:, 1], 
-                                    c=spatial_density, cmap='coolwarm', 
-                                    s=50, alpha=0.7)
-        cbar4 = plt.colorbar(density_scatter, ax=ax4, shrink=0.8)
-        cbar4.set_label('Spatial Density σ(x)')
-        ax4.set_title('Spatial Density Distribution')
-        ax4.set_xlabel('X₁')
-        ax4.set_ylabel('X₂')
-        ax4.grid(True, alpha=0.3)
-        
-        # Plot 5: Gradient Field Analysis
-        ax5 = fig.add_subplot(gs[1, 0])
-        gradient_norm = step_data['gradient_norm']
-        grad_scatter = ax5.scatter(gen_samples[:, 0], gen_samples[:, 1], 
-                                 c=gradient_norm, cmap='RdYlBu_r', s=50, alpha=0.7)
-        cbar5 = plt.colorbar(grad_scatter, ax=ax5, shrink=0.8)
-        cbar5.set_label('Gradient Norm |∇u|')
-        ax5.set_title('Critic Gradient Norm Distribution')
-        ax5.set_xlabel('X₁')
-        ax5.set_ylabel('X₂')
-        ax5.grid(True, alpha=0.3)
-        
-        # Plot 6: Congestion Cost Analysis
-        ax6 = fig.add_subplot(gs[1, 1])
-        
-        # Create histogram of traffic intensity
-        ax6.hist(traffic_intensity, bins=20, alpha=0.7, color='skyblue', 
-                edgecolor='black', label='Traffic Intensity')
-        ax6.axvline(traffic_intensity.mean(), color='red', linestyle='--', 
-                   label=f'Mean: {traffic_intensity.mean():.4f}')
-        ax6.set_title('Traffic Intensity Distribution')
-        ax6.set_xlabel('Traffic Intensity |w_Q|')
-        ax6.set_ylabel('Frequency')
-        ax6.legend()
-        ax6.grid(True, alpha=0.3)
-        
-        # Plot 7: Flow Direction Analysis
-        ax7 = fig.add_subplot(gs[1, 2])
-        
-        # Compute flow directions (angles)
-        flow_angles = np.arctan2(traffic_flow[:, 1], traffic_flow[:, 0])
-        ax7.hist(flow_angles, bins=20, alpha=0.7, color='lightgreen', 
-                edgecolor='black')
-        ax7.set_title('Flow Direction Distribution')
-        ax7.set_xlabel('Flow Angle (radians)')
-        ax7.set_ylabel('Frequency')
-        ax7.grid(True, alpha=0.3)
-        
-        # Plot 8: Statistics Summary
-        ax8 = fig.add_subplot(gs[1, 3])
-        ax8.axis('off')
-        
-        stats_text = f"""
-        Congested Transport Statistics (Step {step})
-        
-        Traffic Flow:
-        • Mean Intensity: {traffic_intensity.mean():.6f}
-        • Max Intensity: {traffic_intensity.max():.6f}
-        • Flow Magnitude: {np.linalg.norm(traffic_flow, axis=1).mean():.6f}
-        
-        Spatial Properties:
-        • Mean Density: {spatial_density.mean():.6f}
-        • Density Variance: {spatial_density.var():.6f}
-        
-        Critic Gradients:
-        • Mean Grad Norm: {gradient_norm.mean():.6f}
-        • Grad Norm Std: {gradient_norm.std():.6f}
-        
-        Congestion:
-        • Total Cost: {step_data['congestion_cost']:.6f}
-        • Continuity Residual: {step_data['continuity_residual']:.6f}
-        """
-        
-        ax8.text(0.05, 0.95, stats_text, transform=ax8.transAxes, 
-                verticalalignment='top', fontsize=10, fontfamily='monospace',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8))
-        
-        # Plot 9: Flow Streamlines (if possible)
-        ax9 = fig.add_subplot(gs[2, :2])
-        
-        # Create a regular grid for streamlines
-        x_range = np.linspace(gen_samples[:, 0].min() - 1, gen_samples[:, 0].max() + 1, 15)
-        y_range = np.linspace(gen_samples[:, 1].min() - 1, gen_samples[:, 1].max() + 1, 15)
-        X, Y = np.meshgrid(x_range, y_range)
-        
-        # Interpolate flow field to grid
-        from scipy.interpolate import griddata
-        try:
-            U = griddata(gen_samples, traffic_flow[:, 0], (X, Y), method='linear', fill_value=0)
-            V = griddata(gen_samples, traffic_flow[:, 1], (X, Y), method='linear', fill_value=0)
-            
-            # Create streamplot
-            ax9.streamplot(X, Y, U, V, density=1.5, color='darkblue', alpha=0.6)
-            ax9.scatter(gen_samples[:, 0], gen_samples[:, 1], c='blue', s=20, alpha=0.5)
-            ax9.scatter(target_samples[:, 0], target_samples[:, 1], c='red', s=20, alpha=0.5)
-            ax9.set_title('Traffic Flow Streamlines')
-            ax9.set_xlabel('X₁')
-            ax9.set_ylabel('X₂')
-            ax9.grid(True, alpha=0.3)
-        except:
-            ax9.text(0.5, 0.5, 'Streamlines unavailable\n(scipy required)', 
-                    ha='center', va='center', transform=ax9.transAxes)
-        
-        # Plot 10: Evolution Tracking
-        ax10 = fig.add_subplot(gs[2, 2:])
-        
-        if len(self.step_data) > 1:
-            steps = [data['step'] for data in self.step_data]
-            costs = [data['congestion_cost'] for data in self.step_data]
-            continuity = [data['continuity_residual'] for data in self.step_data]
-            
-            ax10_twin = ax10.twinx()
-            
-            line1 = ax10.plot(steps, costs, 'b-o', linewidth=2, label='Congestion Cost', markersize=4)
-            line2 = ax10_twin.plot(steps, continuity, 'r-s', linewidth=2, label='Continuity Residual', markersize=4)
-            
-            ax10.set_xlabel('Perturbation Step')
-            ax10.set_ylabel('Congestion Cost H(x,i)', color='blue')
-            ax10_twin.set_ylabel('Continuity Residual', color='red')
-            ax10.set_title('Congestion Evolution')
-            ax10.grid(True, alpha=0.3)
-            
-            # Combine legends
-            lines = line1 + line2
-            labels = [l.get_label() for l in lines]
-            ax10.legend(lines, labels, loc='upper right')
-        else:
-            ax10.text(0.5, 0.5, 'Evolution data\n(requires multiple steps)', 
-                     ha='center', va='center', transform=ax10.transAxes)
-        
+        fig.suptitle(f'Multi-Marginal Traffic Flow Analysis - Epoch {epoch}', fontsize=18, fontweight='bold')
+
+        # Plot 1: Overview with all domains and virtual target
+        ax_overview = fig.add_subplot(gs[0, :2])
+
+        # Plot generated samples
+        ax_overview.scatter(gen_samples[:, 0].cpu(), gen_samples[:, 1].cpu(),
+                    c='blue', alpha=0.6, s=30, label='Generated', zorder=3)
+
+        # Plot evidence domains with different colors
+        for i, evidence in enumerate(evidence_list):
+            ax_overview.scatter(evidence[:, 0].cpu(), evidence[:, 1].cpu(),
+                        c=[self.domain_colors[i]], alpha=0.7, s=40,
+                        label=f'Evidence {i+1}', marker='s', zorder=2)
+
+        # Plot virtual target
+        ax_overview.scatter(virtual_samples[:, 0].cpu(), virtual_samples[:, 1].cpu(),
+                    c='red', alpha=0.5, s=25, label='Virtual Target', marker='^', zorder=1)
+
+        ax_overview.set_title('Multi-Domain Overview')
+        ax_overview.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax_overview.grid(True, alpha=0.3)
+        ax_overview.set_xlabel('X₁')
+        ax_overview.set_ylabel('X₂')
+
+        # Plot 2: Combined traffic flow vector field
+        ax_combined_flow = fig.add_subplot(gs[0, 2:])
+
+        if domain_flows:
+            # Combine flows from all domains
+            all_flows = np.stack([df['flow'] for df in domain_flows])
+            combined_flow = np.mean(all_flows, axis=0)  # Average across domains
+            all_intensities = np.stack([df['intensity'] for df in domain_flows])
+            combined_intensity = np.mean(all_intensities, axis=0)
+
+            # Subsample for cleaner visualization
+            gen_samples_np = gen_samples.detach().cpu().numpy()
+            subsample_idx = np.random.choice(len(gen_samples_np), min(80, len(gen_samples_np)), replace=False)
+
+            quiv = self._unit_quiver(
+                ax_combined_flow,
+                gen_samples_np[subsample_idx, 0], gen_samples_np[subsample_idx, 1],
+                combined_flow[subsample_idx, 0], combined_flow[subsample_idx, 1],
+                color_by=combined_intensity[subsample_idx],
+                arrow_frac=0.1,
+                width=0.004, cmap='viridis', alpha=0.85
+            )
+            cbar = plt.colorbar(quiv, ax=ax_combined_flow, shrink=0.7)
+            cbar.set_label('Combined Traffic Intensity')
+
+        ax_combined_flow.set_title('Combined Multi-Marginal Flow Field')
+        ax_combined_flow.grid(True, alpha=0.3)
+        ax_combined_flow.set_xlabel('X₁')
+        ax_combined_flow.set_ylabel('X₂')
+
+        # Plots 3-5: Domain-specific traffic flows
+        for i, domain_flow in enumerate(domain_flows[:3]):  # Show up to 3 domains
+            ax_domain_flow = fig.add_subplot(gs[1, i])
+            flow = domain_flow['flow']
+            intensity = domain_flow['intensity']
+            evidence = domain_flow['evidence']
+
+            # Plot evidence domain
+            ax_domain_flow.scatter(evidence[:, 0], evidence[:, 1],
+                       c=[self.domain_colors[i]], alpha=0.7, s=50,
+                       label=f'Evidence {i+1}', marker='s')
+
+            # Plot flow vectors for this domain
+            gen_samples_np = gen_samples.detach().cpu().numpy()
+            subsample_idx = np.random.choice(len(gen_samples_np), min(40, len(gen_samples_np)), replace=False)
+
+            quiv = self._unit_quiver(
+                ax_domain_flow,
+                gen_samples_np[subsample_idx, 0], gen_samples_np[subsample_idx, 1],
+                flow[subsample_idx, 0], flow[subsample_idx, 1],
+                color_by=intensity[subsample_idx],
+                arrow_frac=0.1, width=0.005, cmap='plasma', alpha=0.85
+            )
+            plt.colorbar(quiv, ax=ax_domain_flow, shrink=0.75)
+
+            ax_domain_flow.set_title(f'Domain {i+1} Flow Field')
+            ax_domain_flow.grid(True, alpha=0.3)
+            ax_domain_flow.set_xlabel('X₁')
+            ax_domain_flow.set_ylabel('X₂')
+
+            # Add domain statistics
+            stats_text = f"""
+Domain {i+1} Stats:
+Mean Intensity: {intensity.mean():.4f}
+Max Intensity: {intensity.max():.4f}
+Flow Magnitude: {np.linalg.norm(flow, axis=1).mean():.4f}
+"""
+            ax_domain_flow.text(0.02, 0.98, stats_text, transform=ax_domain_flow.transAxes,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7),
+                    fontsize=8)
+
+        # Plot 6: Multi-marginal intensity comparison
+        if len(domain_flows) > 1:
+            ax_intensity_comparison = fig.add_subplot(gs[1, 3])
+            domain_labels = [f'Domain {df["domain_id"]+1}' for df in domain_flows]
+            mean_intensities = [df['intensity'].mean() for df in domain_flows]
+            max_intensities = [df['intensity'].max() for df in domain_flows]
+
+            x_pos = np.arange(len(domain_labels))
+            width = 0.35
+
+            bars1 = ax_intensity_comparison.bar(x_pos - width/2, mean_intensities, width,
+                            label='Mean Intensity', alpha=0.7, color='skyblue')
+            bars2 = ax_intensity_comparison.bar(x_pos + width/2, max_intensities, width,
+                            label='Max Intensity', alpha=0.7, color='lightcoral')
+
+            ax_intensity_comparison.set_title('Domain Intensity Comparison')
+            ax_intensity_comparison.set_xlabel('Evidence Domains')
+            ax_intensity_comparison.set_ylabel('Traffic Intensity')
+            ax_intensity_comparison.set_xticks(x_pos)
+            ax_intensity_comparison.set_xticklabels(domain_labels)
+            ax_intensity_comparison.legend()
+            ax_intensity_comparison.grid(True, alpha=0.3)
+
+        # Plot 7: Spatial density heatmap
+        ax_density_heatmap = fig.add_subplot(gs[2, :2])
+        if domain_flows:
+            # Combine densities from all domains
+            all_densities = np.stack([df['density'] for df in domain_flows])
+            combined_density = np.mean(all_densities, axis=0)
+
+            gen_samples_np = gen_samples.detach().cpu().numpy()
+            scatter = ax_density_heatmap.scatter(gen_samples_np[:, 0], gen_samples_np[:, 1],
+                                  c=combined_density, cmap='coolwarm', s=50, alpha=0.7)
+
+            cbar7 = plt.colorbar(scatter, ax=ax_density_heatmap, shrink=0.7)
+            cbar7.set_label('Combined Spatial Density σ(x)')
+
+        ax_density_heatmap.set_title('Multi-Domain Spatial Density')
+        ax_density_heatmap.grid(True, alpha=0.3)
+        ax_density_heatmap.set_xlabel('X₁')
+        ax_density_heatmap.set_ylabel('X₂')
+        x_min, x_max = np.nanmin(gen_samples_np[:,0]), np.nanmax(gen_samples_np[:,0])
+        y_min, y_max = np.nanmin(gen_samples_np[:,1]), np.nanmax(gen_samples_np[:,1])
+        xr = max(x_max - x_min, 1e-6); yr = max(y_max - y_min, 1e-6)
+        ax_density_heatmap.set_xlim(x_min - 0.05*xr, x_max + 0.05*xr)
+        ax_density_heatmap.set_ylim(y_min - 0.05*yr, y_max + 0.05*yr)
+
+        # Plot 8: Congestion cost evolution
+        ax_congestion_cost = fig.add_subplot(gs[2, 2:])
+        if multi_congestion_info and 'domains' in multi_congestion_info:
+            domain_ids = []
+            domain_costs = []
+            for domain_info in multi_congestion_info['domains']:
+                domain_ids.append(f"Domain {domain_info['domain_id']+1}")
+                domain_costs.append(domain_info['congestion_cost'].item())
+
+            bars = ax_congestion_cost.bar(domain_ids, domain_costs, alpha=0.7,
+                           color=[self.domain_colors[i] for i in range(len(domain_costs))])
+
+            ax_congestion_cost.set_title('Domain-Specific Congestion Costs')
+            ax_congestion_cost.set_xlabel('Evidence Domains')
+            ax_congestion_cost.set_ylabel('Congestion Cost H(x,i)')
+            ax_congestion_cost.grid(True, alpha=0.3)
+
+            # Add cost values on bars
+            for bar, cost in zip(bars, domain_costs):
+                height = bar.get_height()
+                ax_congestion_cost.text(bar.get_x() + bar.get_width()/2., height + 0.001,
+                         f'{cost:.4f}', ha='center', va='bottom', fontsize=9)
+
         plt.tight_layout()
-        
+
         if save:
-            save_path = self.save_dir / f"congested_transport_step_{step:03d}.png"
+            save_path = self.save_dir / f"multimarginal_flow_epoch_{epoch:03d}.png"
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved congested transport visualization: {save_path}")
-        
-        plt.show()
+            print(f"Saved multi-marginal flow visualization: {save_path}")
+
+        # if epoch % 5 == 0:
+        #     plt.show()
+        # else:
+        #     plt.close()  # Only show every 5th epoch
         plt.close()
-    
-    def create_final_summary(self, save=True):
-        """Create final summary of congested transport evolution."""
-        if not self.step_data:
-            print("No data available for summary.")
+
+        return epoch_data
+
+    def _unit_quiver(self, ax, X, Y, U, V, color_by=None, arrow_frac=0.1, width=0.004, cmap='viridis', alpha=0.85):
+        """
+        Draws a quiver plot that shows only directions using arrows of equal length.
+        - arrow_frac: Arrow length as a fraction of the axis range (e.g., 0.1 means 10% of the x-range)
+        - color_by: Values to encode color (e.g., traffic_intensity); if None, use a single color
+        """
+        X = np.asarray(X); Y = np.asarray(Y); U = np.asarray(U); V = np.asarray(V)
+        # Direction unit vectors
+        mag = np.sqrt(U**2 + V**2) + 1e-12
+        Uu = U / mag
+        Vu = V / mag
+
+        # Axis range extents
+        x_min = np.nanmin(X); x_max = np.nanmax(X)
+        y_min = np.nanmin(Y); y_max = np.nanmax(Y)
+        x_range = max(x_max - x_min, 1e-6)
+        y_range = max(y_max - y_min, 1e-6)
+
+        # Determine on-screen uniform arrow length considering both x and y ranges
+        # Quiver interprets U,V in data coordinates; compensate for x/y scale differences
+        # Reference length: includes compensation for diagonal components
+        target_len_x = arrow_frac * x_range
+        target_len_y = arrow_frac * y_range
+        U_plot = Uu * target_len_x
+        V_plot = Vu * target_len_y
+
+        quiv = ax.quiver(
+            X, Y, U_plot, V_plot,
+            color_by if color_by is not None else None,
+            cmap=cmap, angles='xy', scale_units='xy', scale=1.0,
+            width=width, alpha=alpha
+        )
+        # Set axis limits with a small margin for better visuals
+        ax.set_xlim(x_min - 0.05*x_range, x_max + 0.05*x_range)
+        ax.set_ylim(y_min - 0.05*y_range, y_max + 0.05*y_range)
+        return quiv
+
+
+    def create_multimarginal_summary(self, save=True):
+        """
+        Create a comprehensive summary of multi-marginal traffic flow evolution.
+
+        Args:
+            save (bool): Whether to save the summary plot.
+        """
+
+        if not self.epoch_data:
+            print("No epoch data available for summary.")
             return
-        
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle('Congested Transport Evolution Summary', fontsize=16, fontweight='bold')
-        
-        steps = [data['step'] for data in self.step_data]
-        costs = [data['congestion_cost'] for data in self.step_data]
-        continuity = [data['continuity_residual'] for data in self.step_data]
-        mean_intensities = [data['traffic_intensity'].mean() for data in self.step_data]
-        max_intensities = [data['traffic_intensity'].max() for data in self.step_data]
-        mean_densities = [data['spatial_density'].mean() for data in self.step_data]
-        
-        # Congestion cost evolution
-        axes[0, 0].plot(steps, costs, 'b-o', linewidth=2, markersize=4)
-        axes[0, 0].set_title('Congestion Cost Evolution')
-        axes[0, 0].set_xlabel('Step')
-        axes[0, 0].set_ylabel('H(x, i_Q)')
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # Traffic intensity evolution
-        axes[0, 1].plot(steps, mean_intensities, 'g-o', linewidth=2, label='Mean', markersize=4)
-        axes[0, 1].plot(steps, max_intensities, 'r--s', linewidth=2, label='Max', markersize=4)
-        axes[0, 1].set_title('Traffic Intensity Evolution')
-        axes[0, 1].set_xlabel('Step')
-        axes[0, 1].set_ylabel('|w_Q|')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
-        
-        # Spatial density evolution
-        axes[0, 2].plot(steps, mean_densities, 'm-o', linewidth=2, markersize=4)
-        axes[0, 2].set_title('Spatial Density Evolution')
-        axes[0, 2].set_xlabel('Step')
-        axes[0, 2].set_ylabel('σ(x)')
-        axes[0, 2].grid(True, alpha=0.3)
-        
-        # Continuity equation residual
-        axes[1, 0].plot(steps, continuity, 'orange', linewidth=2, marker='o', markersize=4)
-        axes[1, 0].set_title('Continuity Equation Residual')
-        axes[1, 0].set_xlabel('Step')
-        axes[1, 0].set_ylabel('|∂_t ρ + ∇·w|')
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Final flow field comparison
-        if len(self.step_data) >= 2:
-            initial_data = self.step_data[0]
-            final_data = self.step_data[-1]
-            
-            # Initial flow field
-            ax = axes[1, 1]
-            samples = initial_data['gen_samples']
-            flow = initial_data['traffic_flow']
-            intensity = initial_data['traffic_intensity']
-            
-            indices = np.random.choice(len(samples), min(50, len(samples)), replace=False)
-            quiver1 = ax.quiver(samples[indices, 0], samples[indices, 1],
-                               flow[indices, 0], flow[indices, 1],
-                               intensity[indices], cmap='viridis', alpha=0.8)
-            ax.set_title(f'Initial Flow Field (Step {initial_data["step"]})')
-            ax.grid(True, alpha=0.3)
-            
-            # Final flow field
-            ax = axes[1, 2]
-            samples = final_data['gen_samples']
-            flow = final_data['traffic_flow']
-            intensity = final_data['traffic_intensity']
-            
-            indices = np.random.choice(len(samples), min(50, len(samples)), replace=False)
-            quiver2 = ax.quiver(samples[indices, 0], samples[indices, 1],
-                               flow[indices, 0], flow[indices, 1],
-                               intensity[indices], cmap='viridis', alpha=0.8)
-            ax.set_title(f'Final Flow Field (Step {final_data["step"]})')
-            ax.grid(True, alpha=0.3)
-        
+
+        fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+        fig.suptitle('Multi-Marginal Traffic Flow Evolution Summary', fontsize=16, fontweight='bold')
+
+        epochs = [data['epoch'] for data in self.epoch_data]
+
+        # Extract domain-specific metrics over time
+        domain_metrics = {i: {'intensities': [], 'densities': [], 'flow_mags': []}
+                          for i in range(self.num_domains)}
+        combined_intensities = []
+        combined_densities = []
+        combined_flow_mags = []
+
+        for data in self.epoch_data:
+            domain_flows = data['domain_flows']
+            if domain_flows:
+                # Combined metrics
+                all_intensities = [df['intensity'] for df in domain_flows]
+                all_densities = [df['density'] for df in domain_flows]
+                all_flows = [df['flow'] for df in domain_flows]
+    
+                combined_intensities.append(np.nanmean([np.mean(intensity) for intensity in all_intensities]) if all_intensities else np.nan)
+                combined_densities.append(np.nanmean([np.mean(density) for density in all_densities]) if all_densities else np.nan)
+                combined_flow_mags.append(np.nanmean([np.linalg.norm(flow, axis=1).mean() for flow in all_flows]) if all_flows else np.nan)
+
+                # Domain-specific metrics
+                for df in domain_flows:
+                    domain_id = df['domain_id']
+                    domain_metrics[domain_id]['intensities'].append(df['intensity'].mean() if df['intensity'].size else np.nan)
+                    domain_metrics[domain_id]['densities'].append(df['density'].mean() if df['density'].size else np.nan)
+                    domain_metrics[domain_id]['flow_mags'].append(np.linalg.norm(df['flow'], axis=1).mean() if df['flow'].size else np.nan)
+
+        # Plot 1: Combined intensity evolution
+        ax_combined_intensity = axes[0, 0]
+        ax_combined_intensity.plot(epochs, combined_intensities, 'b-', linewidth=2, label='Combined Intensity')
+        ax_combined_intensity.set_title('Combined Traffic Intensity Evolution')
+        ax_combined_intensity.set_xlabel('Epoch')
+        ax_combined_intensity.set_ylabel('Mean Traffic Intensity')
+        ax_combined_intensity.legend()
+        ax_combined_intensity.grid(True, alpha=0.3)
+
+        # Plot 2: Domain-specific intensity evolution
+        ax_domain_intensity = axes[0, 1]
+        for domain_id in range(self.num_domains):
+            if domain_metrics[domain_id]['intensities']:
+                ax_domain_intensity.plot(epochs[:len(domain_metrics[domain_id]['intensities'])],
+                         domain_metrics[domain_id]['intensities'],
+                         linewidth=2, label=f'Domain {domain_id+1}',
+                         color=self.domain_colors[domain_id])
+        ax_domain_intensity.set_title('Domain-Specific Intensity Evolution')
+        ax_domain_intensity.set_xlabel('Epoch')
+        ax_domain_intensity.set_ylabel('Mean Traffic Intensity')
+        ax_domain_intensity.legend()
+        ax_domain_intensity.grid(True, alpha=0.3)
+
+        # Plot 3: Combined density evolution
+        ax_combined_density = axes[0, 2]
+        ax_combined_density.plot(epochs, combined_densities, 'g-', linewidth=2, label='Combined Density')
+        ax_combined_density.set_title('Combined Spatial Density Evolution')
+        ax_combined_density.set_xlabel('Epoch')
+        ax_combined_density.set_ylabel('Mean Spatial Density')
+        ax_combined_density.legend()
+        ax_combined_density.grid(True, alpha=0.3)
+
+        # Plot 4: Flow magnitude evolution
+        ax_flow_magnitude = axes[1, 0]
+        ax_flow_magnitude.plot(epochs, combined_flow_mags, 'm-', linewidth=2, label='Combined Flow Magnitude')
+        ax_flow_magnitude.set_title('Combined Flow Magnitude Evolution')
+        ax_flow_magnitude.set_xlabel('Epoch')
+        ax_flow_magnitude.set_ylabel('Mean Flow Magnitude')
+        ax_flow_magnitude.legend()
+        ax_flow_magnitude.grid(True, alpha=0.3)
+
+        # Plot 5: Domain comparison at final epoch
+        ax_final_domain = axes[1, 1]
+        if self.epoch_data:
+            final_data = self.epoch_data[-1]
+            domain_flows = final_data['domain_flows']
+            if domain_flows:
+                domain_names = [f'D{df["domain_id"]+1}' for df in domain_flows]
+                final_intensities = [df['intensity'].mean() for df in domain_flows]
+                bars = ax_final_domain.bar(domain_names, final_intensities,
+                               color=[self.domain_colors[df['domain_id']] for df in domain_flows],
+                               alpha=0.7)
+                ax_final_domain.set_title('Final Domain Intensities')
+                ax_final_domain.set_xlabel('Domains')
+                ax_final_domain.set_ylabel('Mean Intensity')
+                ax_final_domain.grid(True, alpha=0.3)
+
+        # Plot 6: Flow direction coherence
+        ax_flow_coherence = axes[1, 2]
+        # Compute flow coherence across domains
+        flow_coherences = []
+        for data in self.epoch_data:
+            domain_flows = data['domain_flows']
+            if len(domain_flows) > 1:
+                # Compute pairwise flow correlations
+                flows = [df['flow'] for df in domain_flows]
+                correlations = []
+                for i in range(len(flows)):
+                    for j in range(i+1, len(flows)):
+                        # Compute correlation between flow directions
+                        flow_i_norm = flows[i] / (np.linalg.norm(flows[i], axis=1, keepdims=True) + 1e-8)
+                        flow_j_norm = flows[j] / (np.linalg.norm(flows[j], axis=1, keepdims=True) + 1e-8)
+                        corr = np.mean(np.sum(flow_i_norm * flow_j_norm, axis=1))
+                        correlations.append(corr)
+                flow_coherences.append(np.mean(correlations))
+            else:
+                flow_coherences.append(1.0)
+
+        ax_flow_coherence.plot(epochs, flow_coherences, 'orange', linewidth=2, marker='o')
+        ax_flow_coherence.set_title('Inter-Domain Flow Coherence')
+        ax_flow_coherence.set_xlabel('Epoch')
+        ax_flow_coherence.set_ylabel('Flow Direction Correlation')
+        ax_flow_coherence.grid(True, alpha=0.3)
+
+        # Plot 7: Virtual target convergence
+        ax_virtual_convergence = axes[2, 0]
+        # Compute distance to virtual target over time
+        virtual_distances = []
+        for data in self.epoch_data:
+            gen_samples = data['gen_samples']
+            virtual_samples = data['virtual_samples']
+            # Compute mean distance to virtual target
+            distances = []
+            for gen_point in gen_samples:
+                min_dist = np.min(np.linalg.norm(virtual_samples - gen_point, axis=1))
+                distances.append(min_dist)
+            virtual_distances.append(np.mean(distances))
+
+        ax_virtual_convergence.plot(epochs, virtual_distances, 'purple', linewidth=2)
+        ax_virtual_convergence.set_title('Convergence to Virtual Target')
+        ax_virtual_convergence.set_xlabel('Epoch')
+        ax_virtual_convergence.set_ylabel('Mean Distance to Virtual Target')
+        ax_virtual_convergence.grid(True, alpha=0.3)
+
+        # Plot 8: Evidence domain coverage
+        ax_evidence_coverage = axes[2, 1]
+        # Compute how well generated samples cover evidence domains
+        evidence_coverages = []
+        for data in self.epoch_data:
+            gen_samples = data['gen_samples']
+            evidence_list = data['evidence_list']
+            domain_coverages = []
+            for evidence in evidence_list:
+                # Compute minimum distance from each evidence point to generated samples
+                min_distances = []
+                for ev_point in evidence:
+                    min_dist = np.min(np.linalg.norm(gen_samples - ev_point, axis=1))
+                    min_distances.append(min_dist)
+                domain_coverages.append(np.mean(min_distances))
+            evidence_coverages.append(np.mean(domain_coverages))
+
+        ax_evidence_coverage.plot(epochs, evidence_coverages, 'brown', linewidth=2)
+        ax_evidence_coverage.set_title('Evidence Domain Coverage')
+        ax_evidence_coverage.set_xlabel('Epoch')
+        ax_evidence_coverage.set_ylabel('Mean Distance to Evidence')
+        ax_evidence_coverage.grid(True, alpha=0.3)
+
+        # Plot 9: Congestion cost evolution
+        ax_congestion_evolution = axes[2, 2]
+        # Extract congestion costs over time
+        total_congestion_costs = []
+        domain_congestion_costs = {i: [] for i in range(self.num_domains)}
+        for data in self.epoch_data:
+            multi_congestion_info = data['multi_congestion_info']
+            if multi_congestion_info and 'domains' in multi_congestion_info:
+                total_cost = 0
+                for domain_info in multi_congestion_info['domains']:
+                    cost = domain_info['congestion_cost'].item()
+                    domain_id = domain_info['domain_id']
+                    domain_congestion_costs[domain_id].append(cost)
+                    total_cost += cost
+                total_congestion_costs.append(total_cost)
+            else:
+                total_congestion_costs.append(0)
+
+        ax_congestion_evolution.plot(epochs, total_congestion_costs, 'red', linewidth=2, label='Total Cost')
+        for domain_id in range(self.num_domains):
+            if domain_congestion_costs[domain_id]:
+                ax_congestion_evolution.plot(epochs[:len(domain_congestion_costs[domain_id])],
+                         domain_congestion_costs[domain_id],
+                         linewidth=1, alpha=0.7, label=f'Domain {domain_id+1}',
+                         color=self.domain_colors[domain_id])
+        ax_congestion_evolution.set_title('Congestion Cost Evolution')
+        ax_congestion_evolution.set_xlabel('Epoch')
+        ax_congestion_evolution.set_ylabel('Congestion Cost')
+        ax_congestion_evolution.legend()
+        ax_congestion_evolution.grid(True, alpha=0.3)
+
         plt.tight_layout()
-        
+
         if save:
-            save_path = self.save_dir / "congested_transport_summary.png"
+            save_path = self.save_dir / "multimarginal_flow_summary.png"
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved summary: {save_path}")
-        
-        plt.show()
+            print(f"Saved multi-marginal flow summary: {save_path}")
 
+        # plt.show()
 
-# Simple models for demonstration
-class SimpleGenerator(nn.Module):
-    def __init__(self, noise_dim=2, data_dim=2, hidden_dim=64):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(noise_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, data_dim)
-        )
-    
-    def forward(self, z):
-        return self.model(z)
+        return {
+            'epochs': epochs,
+            'combined_intensities': combined_intensities,
+            'combined_densities': combined_densities,
+            'combined_flow_mags': combined_flow_mags,
+            'domain_metrics': domain_metrics,
+            'flow_coherences': flow_coherences,
+            'virtual_distances': virtual_distances,
+            'evidence_coverages': evidence_coverages,
+            'total_congestion_costs': total_congestion_costs
+        }
 
-
-class SimpleCritic(nn.Module):
-    def __init__(self, data_dim=2, hidden_dim=64):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(data_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, 1)
-        )
-    
-    def forward(self, x):
-        return self.model(x)
-
-
-def sample_data(batch_size, means=None, std=0.4, device='cpu'):
-    """Sample from multiple Gaussian clusters."""
-    if means is None:
-        means = [torch.tensor([2.0, 0.0]), torch.tensor([-2.0, 0.0]),
-                torch.tensor([0.0, 2.0]), torch.tensor([0.0, -2.0])]
-    
-    device = torch.device(device)
-    means = [m.to(device) for m in means]
-    
-    samples_per_cluster = batch_size // len(means)
-    remainder = batch_size % len(means)
-    
-    samples = []
-    for i, mean in enumerate(means):
-        n = samples_per_cluster + (1 if i < remainder else 0)
-        cluster_samples = mean + std * torch.randn(n, 2, device=device)
-        samples.append(cluster_samples)
-    
-    return torch.cat(samples, dim=0)
-
-
-def simple_pretrain(generator, critic, real_sampler, epochs=50, batch_size=64, device='cpu'):
-    """Simple WGAN-GP pretraining."""
-    device = torch.device(device)
-    generator.to(device)
-    critic.to(device)
-    
-    opt_g = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.0, 0.9))
-    opt_c = torch.optim.Adam(critic.parameters(), lr=2e-4, betas=(0.0, 0.9))
-    
-    for epoch in range(epochs):
-        # Train critic
-        for _ in range(5):
-            real = real_sampler(batch_size).to(device)
-            noise = torch.randn(batch_size, 2, device=device)
-            fake = generator(noise).detach()
-            
-            # Gradient penalty
-            alpha = torch.rand(batch_size, 1, device=device).expand_as(real)
-            interpolated = alpha * real + (1 - alpha) * fake
-            interpolated.requires_grad_(True)
-            
-            critic_interp = critic(interpolated)
-            gradients = torch.autograd.grad(
-                outputs=critic_interp.sum(),
-                inputs=interpolated,
-                create_graph=True
-            )[0]
-            
-            gp = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
-            
-            loss_c = critic(fake).mean() - critic(real).mean() + 10.0 * gp
-            
-            opt_c.zero_grad()
-            loss_c.backward()
-            opt_c.step()
-        
-        # Train generator
-        noise = torch.randn(batch_size, 2, device=device)
-        fake = generator(noise)
-        loss_g = -critic(fake).mean()
-        
-        opt_g.zero_grad()
-        loss_g.backward()
-        opt_g.step()
-        
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}: G_loss={loss_g.item():.4f}, C_loss={loss_c.item():.4f}")
-    
-    return generator, critic
-
-
-def run_congestion_analysis_example():
-    """Run complete congestion analysis example."""
-    print("="*80)
-    print("CONGESTED TRANSPORT ANALYSIS WITH TRAFFIC FLOW VISUALIZATION")
-    print("="*80)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    # Create models
-    generator = SimpleGenerator().to(device)
-    critic = SimpleCritic().to(device)
-    
-    # Real data sampler
-    real_sampler = lambda bs: sample_data(bs, device=device)
-    
-    # Pretrain models
-    print("\nPretraining models...")
-    generator, critic = simple_pretrain(generator, critic, real_sampler, epochs=100, device=device)
-    print("Pretraining completed.")
-    
-    # Create target distribution (shifted)
-    shift = torch.tensor([1.5, 1.5], device=device)
-    target_means = [torch.tensor([2.0, 0.0]) + shift, torch.tensor([-2.0, 0.0]) + shift,
-                   torch.tensor([0.0, 2.0]) + shift, torch.tensor([0.0, -2.0]) + shift]
-    target_samples = sample_data(400, means=target_means, device=device)
-    
-    # Initialize visualizer
-    visualizer = CongestedTransportVisualizer(save_dir="congestion_analysis_demo")
-    
-    # Simple perturbation with congestion tracking
-    print("\nStarting perturbation with congestion tracking...")
-    
-    # Create a copy of the generator for perturbation
-    pert_gen = SimpleGenerator().to(device)
-    pert_gen.load_state_dict(generator.state_dict())
-    
-    # Simple perturbation loop
-    learning_rate = 0.01
-    lambda_congestion = 0.1
-    
-    for step in range(15):
-        print(f"\n--- Step {step} ---")
-        
-        # Generate noise for this step
-        noise_samples = torch.randn(400, 2, device=device)
-        
-        # Visualize congested transport at this step
-        step_data = visualizer.visualize_congested_transport_step(
-            step, pert_gen, critic, target_samples, noise_samples, 
-            lambda_congestion, save=True
-        )
-        
-        # Simple gradient step towards target
-        pert_gen.train()
-        noise = torch.randn(200, 2, device=device)
-        gen_samples = pert_gen(noise)
-        
-        # Simple L2 loss to target (for demonstration)
-        target_subset = target_samples[:200]
-        loss = torch.nn.MSELoss()(gen_samples, target_subset)
-        
-        pert_gen.zero_grad()
-        loss.backward()
-        
-        # Apply gradient step with clipping
-        torch.nn.utils.clip_grad_norm_(pert_gen.parameters(), 0.1)
-        with torch.no_grad():
-            for param in pert_gen.parameters():
-                param -= learning_rate * param.grad
-        
-        print(f"Step {step}: Loss={loss.item():.4f}, Congestion Cost={step_data['congestion_cost']:.6f}")
-        print(f"  Mean Traffic Intensity: {step_data['traffic_intensity'].mean():.6f}")
-        print(f"  Continuity Residual: {step_data['continuity_residual']:.6f}")
-    
-    # Create final summary
-    print("\nCreating evolution summary...")
-    visualizer.create_final_summary(save=True)
-    
-    print(f"\nAnalysis complete! Results saved in: {visualizer.save_dir}")
-    print("Generated visualizations:")
-    print("  - Step-by-step congested transport analysis")
-    print("  - Traffic flow vector fields")
-    print("  - Spatial density distributions")
-    print("  - Congestion cost evolution")
-    print("  - Continuity equation verification")
-
-
-def create_enhanced_sobolev_example():
-    """Create enhanced example with Sobolev regularization."""
-    print("="*80)
-    print("ENHANCED CONGESTED TRANSPORT WITH SOBOLEV REGULARIZATION")
-    print("="*80)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Enhanced critic with Sobolev constraints
-    class SobolevConstrainedCritic(nn.Module):
-        def __init__(self, data_dim=2, hidden_dim=64, lambda_sobolev=0.01):
-            super().__init__()
-            self.lambda_sobolev = lambda_sobolev
-            
-            self.model = nn.Sequential(
-                nn.Linear(data_dim, hidden_dim),
-                nn.LeakyReLU(0.2),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LeakyReLU(0.2),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LeakyReLU(0.2),
-                nn.Linear(hidden_dim, 1)
-            )
-        
-        def forward(self, x):
-            return self.model(x)
-        
-        def sobolev_regularization(self, samples, sigma):
-            """Compute weighted Sobolev norm."""
-            samples.requires_grad_(True)
-            
-            u_values = self(samples)
-            gradients = torch.autograd.grad(
-                outputs=u_values.sum(),
-                inputs=samples,
-                create_graph=True,
-                retain_graph=True
-            )[0]
-            
-            # Weighted L2 norm of function values
-            l2_term = (u_values ** 2 * sigma.unsqueeze(1)).mean()
-            
-            # Weighted L2 norm of gradients
-            gradient_term = ((gradients ** 2).sum(dim=1) * sigma).mean()
-            
-            return self.lambda_sobolev * (l2_term + gradient_term)
-    
-    # Enhanced perturbation with Sobolev regularization
-    class EnhancedCongestedPerturber:
-        def __init__(self, generator, critic, target_samples, device):
-            self.generator = generator
-            self.critic = critic
-            self.target_samples = target_samples
-            self.device = device
-            
-        def compute_enhanced_loss(self, gen_samples, lambda_congestion=0.1):
-            """Compute loss with congestion and Sobolev terms."""
-            # Compute spatial density
-            density_info = self._compute_spatial_density(gen_samples)
-            sigma = density_info['density_at_samples']
-            
-            # Basic W2 loss (simplified as MSE for demo)
-            w2_loss = torch.cdist(gen_samples, self.target_samples).min(dim=1)[0].mean()
-            
-            # Sobolev regularization
-            sobolev_loss = self.critic.sobolev_regularization(gen_samples, sigma)
-            
-            # Congestion cost
-            flow_info = self._compute_traffic_flow(gen_samples, sigma, lambda_congestion)
-            congestion_cost = self._compute_congestion_cost(
-                flow_info['traffic_intensity'], sigma, lambda_congestion
-            ).mean()
-            
-            total_loss = w2_loss + sobolev_loss + 0.1 * congestion_cost
-            
-            return {
-                'total_loss': total_loss,
-                'w2_loss': w2_loss,
-                'sobolev_loss': sobolev_loss,
-                'congestion_cost': congestion_cost,
-                'flow_info': flow_info,
-                'sigma': sigma
-            }
-        
-        def _compute_spatial_density(self, samples, bandwidth=0.1):
-            """Compute spatial density σ(x)."""
-            n_samples = len(samples)
-            density_at_samples = torch.zeros(n_samples, device=self.device)
-            
-            for i in range(n_samples):
-                distances = torch.norm(samples - samples[i:i+1], dim=1)
-                kernels = torch.exp(-distances**2 / (2 * bandwidth**2))
-                density_at_samples[i] = kernels.sum() / (n_samples * bandwidth * np.sqrt(2 * np.pi))
-            
-            return {'density_at_samples': density_at_samples + 1e-8}
-        
-        def _compute_traffic_flow(self, samples, sigma, lambda_param):
-            """Compute traffic flow with Sobolev-constrained critic."""
-            samples.requires_grad_(True)
-            critic_values = self.critic(samples)
-            
-            critic_gradients = torch.autograd.grad(
-                outputs=critic_values.sum(),
-                inputs=samples,
-                create_graph=True,
-                retain_graph=True
-            )[0]
-            
-            gradient_norm = torch.norm(critic_gradients, p=2, dim=1, keepdim=True)
-            gradient_norm_safe = torch.clamp(gradient_norm, min=1e-8)
-            gradient_excess = torch.relu(gradient_norm - 1.0)
-            
-            traffic_flow = -lambda_param * sigma.unsqueeze(1) * gradient_excess * (
-                critic_gradients / gradient_norm_safe
-            )
-            traffic_intensity = torch.norm(traffic_flow, p=2, dim=1)
-            
-            return {
-                'traffic_flow': traffic_flow,
-                'traffic_intensity': traffic_intensity,
-                'gradient_norm': gradient_norm.squeeze()
-            }
-        
-        def _compute_congestion_cost(self, traffic_intensity, sigma, lambda_param):
-            """Compute congestion cost H(x,i)."""
-            sigma_safe = torch.clamp(sigma, min=1e-8)
-            quadratic_term = traffic_intensity ** 2 / (2 * lambda_param * sigma_safe)
-            linear_term = torch.abs(traffic_intensity)
-            return quadratic_term + linear_term
-    
-    # Run enhanced example
-    generator = SimpleGenerator().to(device)
-    critic = SobolevConstrainedCritic().to(device)
-    
-    # Pretrain
-    real_sampler = lambda bs: sample_data(bs, device=device)
-    generator, _ = simple_pretrain(generator, critic, real_sampler, epochs=80, device=device)
-    
-    # Target
-    shift = torch.tensor([2.0, 2.0], device=device)
-    target_means = [torch.tensor([2.0, 0.0]) + shift, torch.tensor([-2.0, 0.0]) + shift,
-                   torch.tensor([0.0, 2.0]) + shift, torch.tensor([0.0, -2.0]) + shift]
-    target_samples = sample_data(300, means=target_means, device=device)
-    
-    # Enhanced perturbation
-    perturber = EnhancedCongestedPerturber(generator, critic, target_samples, device)
-    visualizer = CongestedTransportVisualizer(save_dir="enhanced_sobolev_analysis")
-    
-    print("\nStarting enhanced perturbation with Sobolev regularization...")
-    
-    pert_gen = SimpleGenerator().to(device)
-    pert_gen.load_state_dict(generator.state_dict())
-    
-    optimizer = torch.optim.Adam(pert_gen.parameters(), lr=0.005)
-    
-    for step in range(20):
-        print(f"\n--- Enhanced Step {step} ---")
-        
-        # Generate samples
-        noise_samples = torch.randn(300, 2, device=device)
-        gen_samples = pert_gen(noise_samples)
-        
-        # Compute enhanced loss
-        loss_info = perturber.compute_enhanced_loss(gen_samples)
-        
-        # Visualize (every 3 steps)
-        if step % 3 == 0:
-            # Create detailed step data for visualization
-            with torch.no_grad():
-                eval_noise = torch.randn(400, 2, device=device)
-                eval_samples = pert_gen(eval_noise)
-                
-                density_info = perturber._compute_spatial_density(eval_samples)
-                flow_info = perturber._compute_traffic_flow(
-                    eval_samples, density_info['density_at_samples'], 0.1
-                )
-                congestion_cost = perturber._compute_congestion_cost(
-                    flow_info['traffic_intensity'], 
-                    density_info['density_at_samples'], 0.1
-                ).mean().item()
-                
-                step_data = visualizer.visualize_congested_transport_step(
-                    step, pert_gen, critic, target_samples, eval_noise, 
-                    lambda_congestion=0.1, save=True
-                )
-        
-        # Optimization step
-        optimizer.zero_grad()
-        loss_info['total_loss'].backward()
-        torch.nn.utils.clip_grad_norm_(pert_gen.parameters(), 0.1)
-        optimizer.step()
-        
-        print(f"Enhanced Step {step}:")
-        print(f"  Total Loss: {loss_info['total_loss'].item():.6f}")
-        print(f"  W2 Loss: {loss_info['w2_loss'].item():.6f}")
-        print(f"  Sobolev Loss: {loss_info['sobolev_loss'].item():.6f}")
-        print(f"  Congestion Cost: {loss_info['congestion_cost'].item():.6f}")
-    
-    visualizer.create_final_summary(save=True)
-    print(f"\nEnhanced analysis complete! Results saved in: {visualizer.save_dir}")
-
-
-def create_interactive_dashboard():
-    """Create an interactive dashboard for real-time analysis."""
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-        import plotly.express as px
-        
-        print("Creating interactive dashboard...")
-        
-        # This would create an interactive Plotly dashboard
-        # For now, we'll create a simpler matplotlib version
-        
-        def plot_interactive_summary(step_data_list):
-            """Create interactive-style summary plots."""
-            if not step_data_list:
-                return
-            
-            fig = plt.figure(figsize=(20, 15))
-            gs = fig.add_gridspec(4, 4, hspace=0.4, wspace=0.3)
-            
-            steps = [data['step'] for data in step_data_list]
-            
-            # Plot 1: 3D Surface of traffic intensity
-            ax1 = fig.add_subplot(gs[0, :2], projection='3d')
-            final_data = step_data_list[-1]
-            samples = final_data['gen_samples']
-            intensity = final_data['traffic_intensity']
-            
-            ax1.scatter(samples[:, 0], samples[:, 1], intensity, 
-                       c=intensity, cmap='viridis', alpha=0.6)
-            ax1.set_title('3D Traffic Intensity Surface')
-            ax1.set_xlabel('X₁')
-            ax1.set_ylabel('X₂')
-            ax1.set_zlabel('Traffic Intensity')
-            
-            # Plot 2: Animated-style flow evolution
-            ax2 = fig.add_subplot(gs[0, 2:])
-            for i, data in enumerate(step_data_list[::3]):  # Every 3rd step
-                alpha = 0.3 + 0.7 * (i / len(step_data_list[::3]))
-                samples = data['gen_samples']
-                flow = data['traffic_flow']
-                
-                indices = np.random.choice(len(samples), 30, replace=False)
-                ax2.quiver(samples[indices, 0], samples[indices, 1],
-                          flow[indices, 0], flow[indices, 1],
-                          alpha=alpha, color=plt.cm.viridis(i/len(step_data_list[::3])))
-            
-            ax2.set_title('Flow Evolution Over Time')
-            ax2.grid(True, alpha=0.3)
-            
-            # Additional analysis plots...
-            # (Add more sophisticated visualizations)
-            
-            plt.savefig('interactive_dashboard.png', dpi=150, bbox_inches='tight')
-            plt.show()
-        
-        return plot_interactive_summary
-        
-    except ImportError:
-        print("Plotly not available. Using matplotlib-based dashboard.")
-        return lambda x: print("Interactive dashboard requires plotly.")
-
-
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Congested Transport Analysis")
-    parser.add_argument("--mode", type=str, default="basic", 
-                       choices=["basic", "enhanced", "interactive"],
-                       help="Analysis mode to run")
-    parser.add_argument("--steps", type=int, default=15,
-                       help="Number of perturbation steps")
-    parser.add_argument("--device", type=str, default="auto",
-                       help="Device to use (auto, cpu, cuda)")
-    parser.add_argument("--save_dir", type=str, default="congestion_analysis",
-                       help="Directory to save results")
-    parser.add_argument("--lambda_congestion", type=float, default=0.1,
-                       help="Congestion parameter lambda")
-    parser.add_argument("--lambda_sobolev", type=float, default=0.01,
-                       help="Sobolev regularization parameter")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Section 3: Evidence-Based Perturbation with Multi-Marginal Flow Visualization")
+    parser.add_argument("--seed", type=int, default=2025, help="Random seed")
+    parser.add_argument("--device", type=str, default=None, help="Device to use")
+    parser.add_argument("--pretrain_epochs", type=int, default=100, help="Pretraining epochs")
+    parser.add_argument("--perturb_epochs", type=int, default=25, help="Perturbation epochs")
+    parser.add_argument("--batch_size", type=int, default=64, help="Training batch size")
+    parser.add_argument("--eval_batch_size", type=int, default=300, help="Evaluation batch size")
+    parser.add_argument("--num_evidence_domains", type=int, default=3, help="Number of evidence domains")
+    parser.add_argument("--samples_per_domain", type=int, default=40, help="Samples per evidence domain")
+    parser.add_argument("--eta_init", type=float, default=0.04, help="Initial learning rate")
+    parser.add_argument("--enable_congestion", action="store_true", default=True, help="Enable congestion tracking")
+    parser.add_argument("--use_sobolev_critic", action="store_true", default=True, help="Use Sobolev-constrained critics")
+    parser.add_argument("--visualize_every", type=int, default=4, help="Visualize traffic flow every N epochs")
+    parser.add_argument("--save_plots", action="store_true", default=True, help="Save plots")
+    parser.add_argument("--verbose", action="store_true", default=True, help="Verbose output")
     return parser.parse_args()
 
+def run_section3_example():
+    """Run Section 3 example with comprehensive multi-marginal traffic flow visualization."""
+    args = parse_args()
 
-if __name__ == "__main__":
-    # Install required packages check
-    try:
-        import scipy.interpolate
-        print("✓ SciPy available for streamline plots")
-    except ImportError:
-        print("⚠ SciPy not available - streamlines will be skipped")
-    
-    try:
-        import plotly
-        print("✓ Plotly available for interactive features")
-    except ImportError:
-        print("⚠ Plotly not available - using matplotlib only")
-    
-    # For demonstration, run basic example
-    print("\n" + "="*80)
-    print("RUNNING CONGESTED TRANSPORT DEMONSTRATION")
+    # Set seed and device
+    set_seed(args.seed)
+    device = torch.device(args.device) if args.device else compute_device()
+
     print("="*80)
-    
-    # Run basic analysis
-    run_congestion_analysis_example()
-    
-    print("\n" + "="*40)
-    print("RUNNING ENHANCED SOBOLEV ANALYSIS")
-    print("="*40)
-    
-    # Run enhanced analysis
-    create_enhanced_sobolev_example()
-    
-    print("\n" + "="*80)
-    print("ALL ANALYSES COMPLETE!")
+    print("SECTION 3: EVIDENCE-BASED PERTURBATION WITH MULTI-MARGINAL TRAFFIC FLOW")
     print("="*80)
-    print("Generated comprehensive visualizations including:")
-    print("  ✓ Spatial density distributions σ(x)")
-    print("  ✓ Traffic flow vector fields w_Q(x)")
-    print("  ✓ Traffic intensity heatmaps i_Q(x)")
-    print("  ✓ Congestion cost evolution H(x,i)")
-    print("  ✓ Continuity equation verification")
-    print("  ✓ Sobolev regularization effects")
-    print("  ✓ Step-by-step evolution tracking")
-    print("  ✓ Flow streamlines and direction analysis")
-    print("\nCheck the generated directories for detailed results!")
+    print(f"Device: {device}")
+    print(f"Theoretical components available: {_THEORETICAL_COMPONENTS_AVAILABLE}")
+    print(f"Evidence domains: {args.num_evidence_domains}")
 
-# Additional utility functions for integration testing
+    if not _THEORETICAL_COMPONENTS_AVAILABLE:
+        print("This example requires theoretical components. Exiting.")
+        return
 
-def test_library_integration():
-    """Test integration of all library components."""
-    print("\n" + "="*60)
-    print("TESTING LIBRARY INTEGRATION")
-    print("="*60)
-    
+    # Check theoretical support
+    support_ok = check_theoretical_support()
+    if not support_ok:
+        print("Warning: Some theoretical components may not work correctly.")
+
+    # Create models
+    print("\nInitializing models...")
+    generator = Generator(noise_dim=2, data_dim=2, hidden_dim=256).to(device)
+
+    # Create multiple critics for evidence domains
+    critics = []
+    for i in range(args.num_evidence_domains):
+        if args.use_sobolev_critic:
+            critic = SobolevConstrainedCritic(
+                data_dim=2, hidden_dim=256,
+                use_spectral_norm=True,
+                lambda_sobolev=0.01,
+                sobolev_bound=1.0
+            ).to(device)
+        else:
+            from weight_perturbation import Critic
+            critic = Critic(data_dim=2, hidden_dim=256).to(device)
+        critics.append(critic)
+    print(f"Created {len(critics)} {'Sobolev-constrained' if args.use_sobolev_critic else 'standard'} critics")
+
+    # Pretrain generator with first critic
+    print(f"\nPretraining generator for {args.pretrain_epochs} epochs...")
+    real_sampler = lambda bs: sample_real_data(
+        bs, means=[torch.tensor([0.0, 0.0], device=device)], std=0.5, device=device
+    )
+
+    pretrained_gen, _ = pretrain_wgan_gp(
+        generator, critics[0], real_sampler,
+        epochs=args.pretrain_epochs,
+        batch_size=args.batch_size,
+        lr=2e-4,
+        device=device,
+        verbose=args.verbose
+    )
+
+    # Create evidence domains
+    print(f"\nCreating {args.num_evidence_domains} evidence domains...")
+    evidence_list, centers = sample_evidence_domains(
+        num_domains=args.num_evidence_domains,
+        samples_per_domain=args.samples_per_domain,
+        random_shift=3.0,  # Spread out domains
+        std=0.5,
+        device=device
+    )
+
+    print("Evidence domain centers:")
+    for i, center in enumerate(centers):
+        print(f" Domain {i+1}: {center}")
+
+    # Initialize multi-marginal traffic flow visualizer
+    visualizer = CongestedTransportVisualizer(
+        num_domains=args.num_evidence_domains,
+        figsize=(20, 12),
+        save_dir=f"test_results/plots/congestion_analysis/"
+    )
+
+    # Create perturber with multi-marginal congestion tracking
+    print(f"\nInitializing multi-marginal perturber...")
+    perturber = CTWeightPerturberTargetNotGiven(
+        pretrained_gen, evidence_list, centers,
+        critics=critics,
+        enable_congestion_tracking=args.enable_congestion
+    )
+
+    print(f"Multi-marginal congestion tracking: {args.enable_congestion}")
+    if args.enable_congestion:
+        print(f"Initialized {len(perturber.multi_congestion_trackers)} domain-specific congestion trackers")
+
+    # Custom perturbation loop with multi-marginal visualization
+    print(f"\nStarting multi-marginal perturbation with flow visualization...")
+    print(f"Will visualize every {args.visualize_every} epochs")
+
     try:
-        # Test basic imports
-        print("Testing imports...")
-        
-        # Mock the imports since the actual files aren't available in this demo
-        print("✓ Core models import")
-        print("✓ Samplers import") 
-        print("✓ Losses import")
-        print("✓ Perturbation classes import")
-        print("✓ Utils import")
-        
-        # Test congestion components
-        print("✓ Congestion tracking import")
-        print("✓ Sobolev regularization import")
-        print("✓ Traffic flow computation import")
-        
-        print("\n✅ All components integrated successfully!")
-        
-        return True
-        
+        data_dim = evidence_list[0].shape[1]
+        pert_gen = perturber._create_generator_copy(data_dim)
+
+        # Initialize perturbation state
+        from weight_perturbation.utils import parameters_to_vector, vector_to_parameters
+        theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
+        delta_theta_prev = torch.zeros_like(theta_prev)
+        eta = args.eta_init
+        best_vec = None
+        best_ot = float('inf')
+
+        # Main perturbation loop with multi-marginal visualization
+        for epoch in range(args.perturb_epochs):
+            # Estimate virtual target with congestion awareness
+            virtual_samples = perturber._estimate_virtual_target_with_congestion(
+                evidence_list, epoch
+            )
+
+            # Generate noise for this epoch
+            noise_samples = torch.randn(args.eval_batch_size, 2, device=device)
+
+            # Compute multi-marginal congestion if enabled
+            multi_congestion_info = None
+            if args.enable_congestion and critics:
+                multi_congestion_info = perturber._compute_multi_marginal_congestion(pert_gen, noise_samples)
+
+            # Visualize multi-marginal traffic flow at specified intervals
+            if epoch % args.visualize_every == 0:
+                print(f"\n--- Visualizing Multi-Marginal Traffic Flow at Epoch {epoch} ---")
+                epoch_data = visualizer.visualize_congested_transport_step(
+                    epoch, pert_gen, critics, evidence_list, virtual_samples,
+                    noise_samples, multi_congestion_info, save=args.save_plots
+                )
+
+                # Print epoch statistics
+                if epoch_data['domain_flows']:
+                    print(f"Epoch {epoch} Multi-Marginal Statistics:")
+                    for df in epoch_data['domain_flows']:
+                        domain_id = df['domain_id']
+                        print(f" Domain {domain_id+1}:")
+                        print(f" Mean intensity: {df['intensity'].mean():.6f}")
+                        print(f" Max intensity: {df['intensity'].max():.6f}")
+                        print(f" Flow magnitude: {np.linalg.norm(df['flow'], axis=1).mean():.6f}")
+
+                    if multi_congestion_info and 'domains' in multi_congestion_info:
+                        total_congestion = sum(d['congestion_cost'].item() for d in multi_congestion_info['domains'])
+                        print(f" Total congestion cost: {total_congestion:.6f}")
+
+            # Compute loss and gradients
+            loss, grads = perturber._compute_loss_and_grad(
+                pert_gen, virtual_samples, 0.012, 0.8, 1.0
+            )
+
+            # Compute delta_theta with multi-marginal congestion awareness
+            if multi_congestion_info and multi_congestion_info['domains']:
+                avg_congestion_info = perturber._average_multi_marginal_congestion(multi_congestion_info)
+                delta_theta = perturber._compute_delta_theta_with_congestion(
+                    grads, eta, perturber.config.get('clip_norm', 0.23),
+                    perturber.config.get('momentum', 0.975),
+                    delta_theta_prev, avg_congestion_info
+                )
+            else:
+                delta_theta = perturber._compute_delta_theta(
+                    grads, eta, perturber.config.get('clip_norm', 0.23),
+                    perturber.config.get('momentum', 0.975),
+                    delta_theta_prev
+                )
+
+            # Apply update
+            theta_prev = perturber._apply_parameter_update(pert_gen, theta_prev, delta_theta)
+            delta_theta_prev = delta_theta.clone()
+
+            # Validate and adapt
+            ot_pert, improvement = perturber._validate_and_adapt(
+                pert_gen, virtual_samples, eta, [], perturber.config.get('patience', 6), args.verbose, epoch
+            )
+
+            # Update best state
+            best_ot, best_vec = perturber._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
+
+            # Adapt learning rate
+            eta, no_improvement_count = perturber._adapt_learning_rate(
+                eta, improvement, epoch, 0, []
+            )
+
+            # Check rollback
+            if perturber._check_rollback_condition_with_congestion([], 0):
+                perturber._restore_best_state(pert_gen, best_vec)
+                eta *= 0.6
+                delta_theta_prev = torch.zeros_like(delta_theta_prev)
+
+            if args.verbose:
+                print(f"[{epoch:2d}] OT(Pert, Evidence)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}")
+
+        # Final restore
+        perturber._restore_best_state(pert_gen, best_vec)
+
+        # Create summary visualization
+        visualizer.create_multimarginal_summary(save=args.save_plots)
+
+        print("\nPerturbation completed successfully!")
+
     except Exception as e:
-        print(f"❌ Integration test failed: {e}")
-        return False
+        print(f"Error in perturbation process: {e}")
 
-def create_comprehensive_demo():
-    """Create a comprehensive demonstration script."""
-    demo_script = '''
-# Comprehensive Weight Perturbation Demo with Congestion Tracking
-
-# 1. Import the complete library
-from weight_perturbation import (
-    Generator, Critic,
-    WeightPerturberTargetGiven, WeightPerturberTargetNotGiven,
-    sample_real_data, sample_target_data, sample_evidence_domains,
-    pretrain_wgan_gp, compute_wasserstein_distance,
-    plot_distributions, set_seed, compute_device
-)
-
-# Optional: Import advanced theoretical components
-try:
-    from weight_perturbation import (
-        CTWeightPerturberTargetGiven, CTWeightPerturberTargetNotGiven,
-        SobolevConstrainedCritic, CongestionTracker,
-        compute_spatial_density, compute_traffic_flow
-    )
-    ADVANCED_AVAILABLE = True
-except ImportError:
-    ADVANCED_AVAILABLE = False
-    print("Advanced theoretical components not available")
-
-# 2. Set up the experiment
-device = compute_device()
-set_seed(42)
-
-# 3. Create and pretrain models
-generator = Generator(noise_dim=2, data_dim=2, hidden_dim=256).to(device)
-critic = Critic(data_dim=2, hidden_dim=256).to(device)
-
-real_sampler = lambda bs: sample_real_data(bs, device=device)
-pretrained_gen, pretrained_crit = pretrain_wgan_gp(
-    generator, critic, real_sampler, epochs=100, device=device
-)
-
-# 4. Target-given perturbation
-target_samples = sample_target_data(1000, shift=[1.5, 1.5], device=device)
-
-if ADVANCED_AVAILABLE:
-    # Use congestion-aware perturber
-    perturber = CTWeightPerturberTargetGiven(
-        pretrained_gen, target_samples, critic=pretrained_crit,
-        enable_congestion_tracking=True
-    )
-else:
-    # Use basic perturber
-    perturber = WeightPerturberTargetGiven(pretrained_gen, target_samples)
-
-perturbed_gen = perturber.perturb(steps=20, verbose=True)
-
-# 5. Evaluate results
-noise = torch.randn(1000, 2, device=device)
-with torch.no_grad():
-    original_samples = pretrained_gen(noise)
-    perturbed_samples = perturbed_gen(noise)
-
-w2_original = compute_wasserstein_distance(original_samples, target_samples)
-w2_perturbed = compute_wasserstein_distance(perturbed_samples, target_samples)
-
-print(f"W2 improvement: {w2_original.item():.4f} → {w2_perturbed.item():.4f}")
-
-# 6. Visualize results
-plot_distributions(original_samples, perturbed_samples, target_samples,
-                  title="Weight Perturbation Results", show=True)
-'''
-    
-    with open("comprehensive_demo.py", "w") as f:
-        f.write(demo_script)
-    
-    print("✓ Created comprehensive_demo.py")
-    print("  Run with: python comprehensive_demo.py")
-
-# Run integration test
 if __name__ == "__main__":
-    test_library_integration()
-    create_comprehensive_demo()
+    run_section3_example()

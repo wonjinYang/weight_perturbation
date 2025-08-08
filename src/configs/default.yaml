@@ -50,34 +50,36 @@ losses:
     blur: 0.06  # Entropic blur for Sinkhorn
     entropy_lambda: 0.012  # Coefficient for entropy regularization
 
-# Perturbation parameters for target-given (improved)
+# Perturbation parameters for target-given
 perturbation_target_given:
-  steps: 24  # Number of perturbation steps
-  eta_init: 0.025  # Initial learning rate (increased for faster convergence)
+  steps: 100  # Number of perturbation steps
+  eta_init: 0.045  # Initial learning rate (increased for faster convergence)
   eta_min: 1e-5  # Minimum learning rate
-  eta_max: 0.1  # Maximum learning rate
-  eta_decay_factor: 0.8  # Learning rate decay when performance degrades
+  eta_max: 0.5  # Maximum learning rate
+  eta_decay_factor: 0.9  # Learning rate decay when performance degrades
   eta_boost_factor: 1.05  # Learning rate boost when performance improves
-  clip_norm: 0.12  # Gradient clipping norm (congestion bound)
-  momentum: 0.91  # Momentum factor for updates
-  patience: 7  # Patience for early stopping
-  rollback_patience: 3  # Patience for rollback mechanism
+  clip_norm: 0.4  # Gradient clipping norm (congestion bound)
+  momentum: 0.95  # Momentum factor for updates
+  patience: 20  # Patience for early stopping
+  rollback_patience: 15  # Patience for rollback mechanism
   improvement_threshold: 1e-4  # Minimum improvement to be considered significant
-  eval_batch_size: 1600  # Batch size for evaluation
+  eval_batch_size: 600  # Batch size for evaluation
 
-# Perturbation parameters for evidence-based (improved)
+# Perturbation parameters for evidence-based
 perturbation_target_not_given:
   epochs: 100  # Number of perturbation epochs
-  eta_init: 0.05  # Initial learning rate (increased for faster convergence)
+  eta_init: 0.045  # Initial learning rate (increased for faster convergence)
   eta_min: 1e-4  # Minimum learning rate
-  eta_max: 0.2  # Maximum learning rate
-  eta_decay_factor: 0.75  # Learning rate decay when performance degrades
-  eta_boost_factor: 1.1  # Learning rate boost when performance improves
-  clip_norm: 0.23  # Gradient clipping norm
+  eta_max: 0.5  # Maximum learning rate
+  eta_decay_factor: 0.9  # Learning rate decay when performance degrades
+  eta_boost_factor: 1.05  # Learning rate boost when performance improves
+  clip_norm: 0.4  # Gradient clipping norm
   momentum: 0.975  # Momentum factor
-  patience: 6  # Patience for early stopping
-  rollback_patience: 4  # Patience for rollback mechanism
+  patience: 20  # Patience for early stopping
+  rollback_patience: 15  # Patience for rollback mechanism
   lambda_entropy: 0.012  # Entropy regularization coefficient
+  lambda_virtual: 0.8  # Entropy regularization coefficient
+  lambda_multi: 1.0  # Entropy regularization coefficient
   improvement_threshold: 1e-3  # Minimum improvement to be considered significant
   eval_batch_size: 600  # Batch size for evaluation and virtual sampling
   bandwidth_base: 0.22  # Base bandwidth for virtual target estimation
@@ -85,8 +87,8 @@ perturbation_target_not_given:
 # Pretraining parameters for WGAN-GP
 pretrain:
   epochs: 300  # Number of pretraining epochs
-  batch_size: 64  # Batch size for training
+  batch_size: 96  # Batch size for training
   lr: 0.0002  # Learning rate for Adam optimizers
-  betas: [0.0, 0.9]  # Beta parameters for Adam
-  gp_lambda: 10.0  # Gradient penalty coefficient
+  betas: [0.0, 0.95]  # Beta parameters for Adam
+  gp_lambda: 0.5  # Gradient penalty coefficient
   critic_iters: 5  # Critic updates per generator update

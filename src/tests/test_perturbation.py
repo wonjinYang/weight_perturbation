@@ -1,13 +1,10 @@
 import unittest
 import torch
-import numpy as np
-from typing import List
 
 from weight_perturbation.perturbation import WeightPerturberTargetGiven, WeightPerturberTargetNotGiven
 from weight_perturbation.models import Generator, Critic
 from weight_perturbation.samplers import sample_target_data, sample_evidence_domains
-from weight_perturbation.utils import parameters_to_vector, vector_to_parameters
-from weight_perturbation.losses import compute_wasserstein_distance
+from weight_perturbation.utils import parameters_to_vector
 from weight_perturbation.pretrain import pretrain_wgan_gp
 from weight_perturbation.samplers import sample_real_data
 

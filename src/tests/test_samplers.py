@@ -1,7 +1,6 @@
 import unittest
 import torch
 import numpy as np
-from typing import List
 
 from weight_perturbation.samplers import (
     sample_real_data,

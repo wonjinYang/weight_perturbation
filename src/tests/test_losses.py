@@ -1,8 +1,6 @@
 import unittest
 import torch
 import torch.nn as nn
-from geomloss import SamplesLoss
-from typing import List
 
 from weight_perturbation.losses import (
     compute_wasserstein_distance,

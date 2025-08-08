@@ -49,7 +49,7 @@ class TrafficFlowVisualizer:
     Traffic flow visualization class for real-time monitoring during perturbation.
     """
     
-    def __init__(self, figsize=(15, 10), save_dir="traffic_flow_plots"):
+    def __init__(self, figsize=(15, 10), save_dir="test_results/plots/traffic_flow_plots"):
         self.figsize = figsize
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
@@ -92,12 +92,12 @@ class TrafficFlowVisualizer:
         # Store step data for analysis
         step_data = {
             'step': step,
-            'samples': gen_samples.cpu().numpy(),
-            'target': target_samples.cpu().numpy(),
-            'flow': flow_info['traffic_flow'].cpu().numpy(),
-            'intensity': flow_info['traffic_intensity'].cpu().numpy(),
-            'density': sigma.cpu().numpy(),
-            'gradient_norm': flow_info['gradient_norm'].cpu().numpy()
+            'samples': gen_samples.detach().cpu().numpy(),
+            'target': target_samples.detach().cpu().numpy(),
+            'flow': flow_info['traffic_flow'].detach().cpu().numpy(),
+            'intensity': flow_info['traffic_intensity'].detach().cpu().numpy(),
+            'density': sigma.detach().cpu().numpy(),
+            'gradient_norm': flow_info['gradient_norm'].detach().cpu().numpy()
         }
         self.step_data.append(step_data)
         
@@ -119,9 +119,9 @@ class TrafficFlowVisualizer:
         
         # Plot 2: Traffic flow vector field
         ax2 = axes[0, 1]
-        samples_np = gen_samples.cpu().numpy()
-        flow_np = flow_info['traffic_flow'].cpu().numpy()
-        intensity_np = flow_info['traffic_intensity'].cpu().numpy()
+        samples_np = gen_samples.detach().cpu().numpy()
+        flow_np = flow_info['traffic_flow'].detach().cpu().numpy()
+        intensity_np = flow_info['traffic_intensity'].detach().cpu().numpy()
         
         # Subsample for cleaner visualization
         subsample_idx = np.random.choice(len(samples_np), min(100, len(samples_np)), replace=False)
@@ -172,7 +172,7 @@ class TrafficFlowVisualizer:
         
         # Density scatter plot
         density_scatter = ax4.scatter(samples_np[:, 0], samples_np[:, 1], 
-                                    c=sigma.cpu().numpy(), cmap='coolwarm', 
+                                    c=sigma.detach().cpu().numpy(), cmap='coolwarm', 
                                     s=50, alpha=0.7)
         
         cbar4 = plt.colorbar(density_scatter, ax=ax4, shrink=0.8)
@@ -204,9 +204,47 @@ Flow Magnitude: {np.linalg.norm(flow_np, axis=1).mean():.4f}"""
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Saved traffic flow visualization: {save_path}")
         
-        plt.show() if step % 5 == 0 else plt.close()  # Only show every 5th step
+        # plt.show() if step % 5 == 0 else plt.close()  # Only show every 5th step
+        plt.close()
         
         return step_data
+    
+    def _unit_quiver(self, ax, X, Y, U, V, color_by=None, arrow_frac=0.1, width=0.004, cmap='viridis', alpha=0.85):
+        """
+        Draws a quiver plot that shows only directions using arrows of equal length.
+        - arrow_frac: Arrow length as a fraction of the axis range (e.g., 0.1 means 10% of the x-range)
+        - color_by: Values to encode color (e.g., traffic_intensity); if None, use a single color
+        """
+        X = np.asarray(X); Y = np.asarray(Y); U = np.asarray(U); V = np.asarray(V)
+        # Direction unit vectors
+        mag = np.sqrt(U**2 + V**2) + 1e-12
+        Uu = U / mag
+        Vu = V / mag
+
+        # Axis range extents
+        x_min = np.nanmin(X); x_max = np.nanmax(X)
+        y_min = np.nanmin(Y); y_max = np.nanmax(Y)
+        x_range = max(x_max - x_min, 1e-6)
+        y_range = max(y_max - y_min, 1e-6)
+
+        # Determine on-screen uniform arrow length considering both x and y ranges
+        # Quiver interprets U,V in data coordinates; compensate for x/y scale differences
+        # Reference length: includes compensation for diagonal components
+        target_len_x = arrow_frac * x_range
+        target_len_y = arrow_frac * y_range
+        U_plot = Uu * target_len_x
+        V_plot = Vu * target_len_y
+
+        quiv = ax.quiver(
+            X, Y, U_plot, V_plot,
+            color_by if color_by is not None else None,
+            cmap=cmap, angles='xy', scale_units='xy', scale=1.0,
+            width=width, alpha=alpha
+        )
+        # Set axis limits with a small margin for better visuals
+        ax.set_xlim(x_min - 0.05*x_range, x_max + 0.05*x_range)
+        ax.set_ylim(y_min - 0.05*y_range, y_max + 0.05*y_range)
+        return quiv
     
     def create_traffic_flow_summary(self, save=True):
         """
@@ -263,9 +301,14 @@ Flow Magnitude: {np.linalg.norm(flow_np, axis=1).mean():.4f}"""
         intensity = first_data['intensity']
         
         subsample_idx = np.random.choice(len(samples), min(50, len(samples)), replace=False)
-        quiver1 = ax4.quiver(samples[subsample_idx, 0], samples[subsample_idx, 1],
-                           flow[subsample_idx, 0], flow[subsample_idx, 1],
-                           intensity[subsample_idx], cmap='viridis', alpha=0.8)
+        
+        quiver1 = self._unit_quiver(
+            ax4,
+            samples[subsample_idx, 0], samples[subsample_idx, 1],
+            flow[subsample_idx, 0], flow[subsample_idx, 1],
+            color_by=intensity[subsample_idx],
+            arrow_frac=0.1, width=0.004, cmap='viridis', alpha=0.8
+        )
         ax4.set_title(f'Initial Flow Field (Step {first_data["step"]})')
         ax4.grid(True, alpha=0.3)
         
@@ -277,9 +320,13 @@ Flow Magnitude: {np.linalg.norm(flow_np, axis=1).mean():.4f}"""
         intensity = final_data['intensity']
         
         subsample_idx = np.random.choice(len(samples), min(50, len(samples)), replace=False)
-        quiver2 = ax5.quiver(samples[subsample_idx, 0], samples[subsample_idx, 1],
-                           flow[subsample_idx, 0], flow[subsample_idx, 1],
-                           intensity[subsample_idx], cmap='viridis', alpha=0.8)
+        quiver2 = self._unit_quiver(
+            ax5,
+            samples[subsample_idx, 0], samples[subsample_idx, 1],
+            flow[subsample_idx, 0], flow[subsample_idx, 1],
+            color_by=intensity[subsample_idx],
+            arrow_frac=0.1, width=0.004, cmap='viridis', alpha=0.8
+        )
         ax5.set_title(f'Final Flow Field (Step {final_data["step"]})')
         ax5.grid(True, alpha=0.3)
         
@@ -320,7 +367,7 @@ Flow Magnitude: {np.linalg.norm(flow_np, axis=1).mean():.4f}"""
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Saved traffic flow summary: {save_path}")
         
-        plt.show()
+        # plt.show()
         
         return {
             'steps': steps,
@@ -415,7 +462,7 @@ def run_section2_example():
     # Initialize traffic flow visualizer
     visualizer = TrafficFlowVisualizer(
         figsize=(15, 10),
-        save_dir=f"section2_traffic_flow_seed_{args.seed}"
+        save_dir=f"test_results/plots/section2_traffic_flow_seed_{args.seed}"
     )
     
     # Create perturber with congestion tracking

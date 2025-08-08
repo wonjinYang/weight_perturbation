@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument("--momentum", type=float, default=0.975, help="Momentum factor")
     parser.add_argument("--patience", type=int, default=6, help="Patience for early stopping")
     parser.add_argument("--lambda_entropy", type=float, default=0.012, help="Entropy regularization coefficient")
-    parser.add_argument("--lambda_virtual", type=float, default=1.0, help="Virtual loss regularization coefficient")
+    parser.add_argument("--lambda_virtual", type=float, default=0.8, help="Virtual loss regularization coefficient")
     parser.add_argument("--lambda_multi", type=float, default=1.0, help="Evidence loss regularization coefficient")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of distributions")
     parser.add_argument("--verbose", action="store_true", help="Print verbose output during training")

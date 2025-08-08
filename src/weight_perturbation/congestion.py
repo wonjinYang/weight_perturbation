@@ -15,7 +15,6 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple, Callable
 from abc import ABC, abstractmethod
 
-
 class CongestionTracker:
     """
     Track congestion metrics throughout the perturbation process.

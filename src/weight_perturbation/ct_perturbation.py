@@ -20,12 +20,9 @@ from .congestion import (
     compute_traffic_flow,
     congestion_cost_function
 )
-from .sobolev import SobolevConstrainedCritic, sobolev_regularization
 from .ct_losses import (
     global_w2_loss_and_grad_with_congestion,
-    multi_marginal_ot_loss_with_congestion,
     CongestionAwareLossFunction,
-    compute_convergence_metrics
 )
 from .losses import compute_wasserstein_distance, multi_marginal_ot_loss
 
@@ -63,7 +60,7 @@ class CTWeightPerturber(ABC):
             self.config = config
             
         self.noise_dim = self.config.get('noise_dim', 2)
-        self.eval_batch_size = self.config.get('eval_batch_size', 1600)
+        self.eval_batch_size = self.config.get('eval_batch_size', 600)
         
         # Initialize congestion tracking
         if self.enable_congestion_tracking:
@@ -85,16 +82,16 @@ class CTWeightPerturber(ABC):
         """Get default configuration."""
         return {
             'noise_dim': 2,
-            'eval_batch_size': 1600,
-            'eta_init': 0.008,
+            'eval_batch_size': 600,
+            'eta_init': 0.045,
             'eta_min': 5e-6,
-            'eta_max': 0.05,
-            'eta_decay_factor': 0.88,
-            'eta_boost_factor': 1.03,
-            'clip_norm': 0.15,
-            'momentum': 0.85,
+            'eta_max': 0.5,
+            'eta_decay_factor': 0.9,
+            'eta_boost_factor': 1.05,
+            'clip_norm': 0.4,
+            'momentum': 0.95,
             'patience': 15,
-            'rollback_patience': 8,
+            'rollback_patience': 7,
             'improvement_threshold': 5e-5,
             'lambda_congestion': 0.1,
             'lambda_sobolev': 0.01,
@@ -258,9 +255,9 @@ class CTWeightPerturber(ABC):
             Tuple[float, int]: (new_eta, updated_no_improvement_count)
         """
         eta_min = self.config.get('eta_min', 5e-6)
-        eta_max = self.config.get('eta_max', 0.05)
-        eta_decay_factor = self.config.get('eta_decay_factor', 0.88)
-        eta_boost_factor = self.config.get('eta_boost_factor', 1.03)
+        eta_max = self.config.get('eta_max', 0.5)
+        eta_decay_factor = self.config.get('eta_decay_factor', 0.9)
+        eta_boost_factor = self.config.get('eta_boost_factor', 1.05)
         improvement_threshold = self.config.get('improvement_threshold', 5e-5)
         
         # Analyze loss trend for better adaptation
@@ -398,110 +395,15 @@ class CTWeightPerturber(ABC):
         """
         pass
     
-        @abstractmethod
-        def perturb(self, *args, **kwargs) -> Generator:
-            """
-            Perform the perturbation process.
-            
-            Returns:
-                Generator: Perturbed generator model.
-            """
-            try:
-                data_dim = self.evidence_list[0].shape[1]
-                pert_gen = self._create_generator_copy(data_dim)
-                
-                # Initialize perturbation state
-                theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
-                
-                if theta_prev.numel() == 0:
-                    raise RuntimeError("Generated generator has no parameters.")
-                    
-                delta_theta_prev = torch.zeros_like(theta_prev)
-                eta = eta_init
-                ot_hist = []
-                best_vec = None
-                best_ot = float('inf')
-                no_improvement_count = 0
-                
-                for epoch in range(epochs):
-                    try:
-                        # Estimate virtual target with congestion awareness
-                        virtual_samples = self._estimate_virtual_target_with_congestion(
-                            self.evidence_list, epoch
-                        )
-                        
-                        # Generate noise for this epoch
-                        noise_samples = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-                        
-                        # Compute multi-marginal congestion if enabled
-                        multi_congestion_info = None
-                        if self.enable_congestion_tracking and self.critics:
-                            multi_congestion_info = self._compute_multi_marginal_congestion(pert_gen, noise_samples)
-                        
-                        # Compute multi-marginal OT loss and gradients
-                        loss, grads = self._compute_loss_and_grad(pert_gen, virtual_samples, lambda_entropy, lambda_virtual, lambda_multi)
-                        
-                        # Compute delta_theta with multi-marginal congestion awareness
-                        if multi_congestion_info and multi_congestion_info['domains']:
-                            avg_congestion_info = self._average_multi_marginal_congestion(multi_congestion_info)
-                            delta_theta = self._compute_delta_theta_with_congestion(
-                                grads, eta, clip_norm, momentum, delta_theta_prev, avg_congestion_info
-                            )
-                        else:
-                            delta_theta = self._compute_delta_theta(grads, eta, clip_norm, momentum, delta_theta_prev)
-                        
-                        # Apply update
-                        theta_prev = self._apply_parameter_update(pert_gen, theta_prev, delta_theta)
-                        delta_theta_prev = delta_theta.clone()
-                        
-                        # Validate and get improvement
-                        ot_pert, improvement = self._validate_and_adapt(pert_gen, virtual_samples, eta, ot_hist, patience, verbose, epoch)
-                        
-                        # Update best state
-                        best_ot, best_vec = self._update_best_state(ot_pert, pert_gen, best_ot, best_vec)
-                        
-                        # Adapt learning rate based on improvement
-                        eta, no_improvement_count = self._adapt_learning_rate(eta, improvement, epoch, no_improvement_count, ot_hist)
-                        
-                        # Check for rollback condition with congestion awareness
-                        if self._check_rollback_condition_with_congestion(ot_hist, no_improvement_count):
-                            if verbose:
-                                print(f"Rollback triggered at epoch {epoch} (no improvement for {no_improvement_count} epochs)")
-                            self._restore_best_state(pert_gen, best_vec)
-                            # Reset parameters after rollback
-                            eta = eta * 0.6
-                            no_improvement_count = 0
-                            delta_theta_prev = torch.zeros_like(delta_theta_prev)
-                        
-                        if verbose:
-                            log_msg = f"[{epoch:2d}] OT(Pert, Evidence)={ot_pert:.4f} Improvement={improvement:.4f} eta={eta:.4f}"
-                            if multi_congestion_info and multi_congestion_info['domains']:
-                                total_congestion = sum(d['congestion_cost'].item() for d in multi_congestion_info['domains'])
-                                log_msg += f" Total_Congestion={total_congestion:.4f}"
-                            print(log_msg)
-                        
-                        # Early stopping if patience exceeded
-                        if no_improvement_count >= patience:
-                            if verbose:
-                                print(f"Early stopping at epoch {epoch} due to lack of improvement")
-                            break
-                            
-                    except Exception as e:
-                        print(f"Error in perturbation epoch {epoch}: {e}")
-                        if epoch == 0:  # If first epoch fails, re-raise
-                            raise
-                        break
-                
-                # Final restore to best state
-                self._restore_best_state(pert_gen, best_vec)
-                
-                return pert_gen
-                
-            except Exception as e:
-                print(f"Error in perturbation process: {e}")
-                # Return a copy of the original generator as fallback
-                data_dim = self.evidence_list[0].shape[1] if hasattr(self, 'evidence_list') and self.evidence_list else 2
-                return self._create_generator_copy(data_dim)
+    @abstractmethod
+    def perturb(self, *args, **kwargs) -> Generator:
+        """
+        Perform the perturbation process.
+        
+        Returns:
+            Generator: Perturbed generator model.
+        """
+        pass
 
 
 class CTWeightPerturberTargetGiven(CTWeightPerturber):
@@ -614,16 +516,16 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
         
         return w2_pert.item(), improvement
     
-    def perturb(self, steps: int = 80, eta_init: float = 0.008, clip_norm: float = 0.15,
-                momentum: float = 0.85, patience: int = 15, verbose: bool = True) -> Generator:
+    def perturb(self, steps: int = 100, eta_init: float = 0.045, clip_norm: float = 0.4,
+                momentum: float = 0.95, patience: int = 15, verbose: bool = True) -> Generator:
         """
         Perform the improved perturbation process with adaptive learning rate, rollback, and congestion tracking.
         
         Args:
-            steps (int): Number of perturbation steps. Defaults to 80.
-            eta_init (float): Initial learning rate. Defaults to 0.008.
-            clip_norm (float): Gradient clipping norm (congestion bound). Defaults to 0.15.
-            momentum (float): Momentum factor for updates. Defaults to 0.85.
+            steps (int): Number of perturbation steps. Defaults to 100.
+            eta_init (float): Initial learning rate. Defaults to 0.045.
+            clip_norm (float): Gradient clipping norm (congestion bound). Defaults to 0.4.
+            momentum (float): Momentum factor for updates. Defaults to 0.95.
             patience (int): Maximum patience before stopping. Defaults to 15.
             verbose (bool): If True, print progress. Defaults to True.
         
@@ -791,18 +693,18 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
     
     def _get_default_config(self) -> Dict:
         """Get default configuration for evidence-based perturbation."""
-        config = {
+        return {
             'noise_dim': 2,
             'eval_batch_size': 600,
             'eta_init': 0.045,
             'eta_min': 1e-4,
-            'eta_max': 0.2,
-            'eta_decay_factor': 0.75,
-            'eta_boost_factor': 1.1,
-            'clip_norm': 0.23,
+            'eta_max': 0.5,
+            'eta_decay_factor': 0.9,
+            'eta_boost_factor': 1.05,
+            'clip_norm': 0.4,
             'momentum': 0.975,
-            'patience': 6,
-            'rollback_patience': 4,
+            'patience': 15,
+            'rollback_patience': 7,
             'lambda_entropy': 0.012,
             'lambda_virtual': 0.8,
             'lambda_multi': 1.0,
@@ -811,7 +713,6 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             'lambda_sobolev': 0.01,
             'congestion_threshold': 0.15,
         }
-        return config
     
     def _estimate_virtual_target_with_congestion(
         self, evidence_list: List[torch.Tensor], epoch: int
@@ -955,7 +856,76 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         
         return avg_info
     
-    def perturb(self, epochs: int = 100, eta_init: float = 0.045, clip_norm: float = 0.23,
+    def _compute_loss_and_grad(self, pert_gen: Generator, virtual_samples: torch.Tensor,
+                               lambda_entropy: float, lambda_virtual: float, lambda_multi: float
+                               ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute multi-marginal OT loss and flattened gradients.
+        
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: (loss, grads)
+        """
+        pert_gen.train()
+        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        gen_out = pert_gen(noise)
+        
+        loss = multi_marginal_ot_loss(
+            gen_out, self.evidence_list, virtual_samples,
+            blur=0.06,
+            lambda_virtual=lambda_virtual,
+            lambda_multi=lambda_multi,
+            lambda_entropy=lambda_entropy
+        )
+        
+        pert_gen.zero_grad()
+        loss.backward()
+        grads = torch.cat([p.grad.view(-1) for p in pert_gen.parameters() if p.grad is not None])
+        return loss, grads
+    
+    def _validate_and_adapt(self, pert_gen: Generator, virtual_samples: torch.Tensor, eta: float,
+                            ot_hist: List[float], patience: int, verbose: bool, epoch: int) -> Tuple[float, float]:
+        """
+        Validate perturbation and compute improvement in multi-marginal case.
+        
+        Args:
+            pert_gen (Generator): Current perturbed generator.
+            virtual_samples (torch.Tensor): Current virtual target samples.
+            eta (float): Current learning rate.
+            ot_hist (List[float]): History of OT losses.
+            patience (int): Patience for adaptation.
+            verbose (bool): Print flag.
+            epoch (int): Current epoch.
+        
+        Returns:
+            Tuple[float, float]: (ot_pert, improvement)
+        """
+        noise_eval = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
+        
+        with torch.no_grad():
+            orig_out = self.generator(noise_eval)
+            pert_out = pert_gen(noise_eval)
+
+        ot_orig = multi_marginal_ot_loss(
+            orig_out, self.evidence_list, virtual_samples,
+            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
+            lambda_multi=self.config.get('lambda_multi', 1.0),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012)
+        ).item()
+
+        ot_pert = multi_marginal_ot_loss(
+            pert_out, self.evidence_list, virtual_samples,
+            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
+            lambda_multi=self.config.get('lambda_multi', 1.0),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012)
+        ).item()
+        
+        # Compute improvement compared to original (lower is better for OT loss)
+        improvement = ot_orig - ot_pert
+        ot_hist.append(ot_pert)
+        
+        return ot_pert, improvement
+    
+    def perturb(self, epochs: int = 100, eta_init: float = 0.045, clip_norm: float = 0.4,
                 momentum: float = 0.975, patience: int = 6, lambda_entropy: float = 0.012,
                 lambda_virtual: float = 0.8, lambda_multi: float = 1.0, verbose: bool = True) -> Generator:
         """
@@ -1071,76 +1041,8 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             # Return a copy of the original generator as fallback
             data_dim = self.evidence_list[0].shape[1] if hasattr(self, 'evidence_list') and self.evidence_list else 2
             return self._create_generator_copy(data_dim)
-    
-    def _compute_loss_and_grad(self, pert_gen: Generator, virtual_samples: torch.Tensor,
-                               lambda_entropy: float, lambda_virtual: float, lambda_multi: float
-                               ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute multi-marginal OT loss and flattened gradients.
-        
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: (loss, grads)
-        """
-        pert_gen.train()
-        noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-        gen_out = pert_gen(noise)
-        
-        loss = multi_marginal_ot_loss(
-            gen_out, self.evidence_list, virtual_samples,
-            blur=0.06,
-            lambda_virtual=lambda_virtual,
-            lambda_multi=lambda_multi,
-            lambda_entropy=lambda_entropy
-        )
-        
-        pert_gen.zero_grad()
-        loss.backward()
-        grads = torch.cat([p.grad.view(-1) for p in pert_gen.parameters() if p.grad is not None])
-        return loss, grads
-    
-    def _validate_and_adapt(self, pert_gen: Generator, virtual_samples: torch.Tensor, eta: float,
-                            ot_hist: List[float], patience: int, verbose: bool, epoch: int) -> Tuple[float, float]:
-        """
-        Validate perturbation and compute improvement in multi-marginal case.
-        
-        Args:
-            pert_gen (Generator): Current perturbed generator.
-            virtual_samples (torch.Tensor): Current virtual target samples.
-            eta (float): Current learning rate.
-            ot_hist (List[float]): History of OT losses.
-            patience (int): Patience for adaptation.
-            verbose (bool): Print flag.
-            epoch (int): Current epoch.
-        
-        Returns:
-            Tuple[float, float]: (ot_pert, improvement)
-        """
-        noise_eval = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
-        
-        with torch.no_grad():
-            orig_out = self.generator(noise_eval)
-            pert_out = pert_gen(noise_eval)
-
-        ot_orig = multi_marginal_ot_loss(
-            orig_out, self.evidence_list, virtual_samples,
-            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
-            lambda_multi=self.config.get('lambda_multi', 1.0),
-            lambda_entropy=self.config.get('lambda_entropy', 0.012)
-        ).item()
-
-        ot_pert = multi_marginal_ot_loss(
-            pert_out, self.evidence_list, virtual_samples,
-            blur=0.06, lambda_virtual=self.config.get('lambda_virtual', 0.8),
-            lambda_multi=self.config.get('lambda_multi', 1.0),
-            lambda_entropy=self.config.get('lambda_entropy', 0.012)
-        ).item()
-        
-        # Compute improvement compared to original (lower is better for OT loss)
-        improvement = ot_orig - ot_pert
-        ot_hist.append(ot_pert)
-        
-        return ot_pert, improvement
 
 
+# Convenience aliases
 CongestionAwareWeightPerturberTargetGiven = CTWeightPerturberTargetGiven
 CongestionAwareWeightPerturberTargetNotGiven = CTWeightPerturberTargetNotGiven

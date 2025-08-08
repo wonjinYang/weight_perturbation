@@ -1,9 +1,7 @@
 import unittest
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.autograd import Variable
-from typing import Callable
+
 
 from weight_perturbation.pretrain import compute_gradient_penalty, pretrain_wgan_gp
 from weight_perturbation.models import Generator, Critic

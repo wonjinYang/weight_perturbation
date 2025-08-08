@@ -8,6 +8,7 @@ and regularization terms from the theoretical framework.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm
 from typing import Dict, Optional, Tuple, Callable
 import numpy as np
 
@@ -20,7 +21,7 @@ class WeightedSobolevRegularizer:
     ||u||_{H^1(Ω, σ)} = ∫(u² + |∇u|²)σ dx
     """
     
-    def __init__(self, lambda_sobolev: float = 0.01, gradient_penalty_weight: float = 1.0):
+    def __init__(self, lambda_sobolev: float = 0.01, gradient_penalty_weight: float = 0.5):
         self.lambda_sobolev = lambda_sobolev
         self.gradient_penalty_weight = gradient_penalty_weight
     
@@ -84,7 +85,7 @@ class AdaptiveSobolevRegularizer(WeightedSobolevRegularizer):
     def __init__(
         self,
         lambda_sobolev: float = 0.01,
-        gradient_penalty_weight: float = 1.0,
+        gradient_penalty_weight: float = 0.5,
         adaptation_factor: float = 0.5,
         congestion_threshold: float = 0.1
     ):
@@ -213,77 +214,6 @@ class SobolevConstraintProjection:
                 'scale_factor': scale_factor
             }
 
-
-class SpectralNormalization(nn.Module):
-    """
-    Spectral normalization to control Lipschitz constant of critic.
-    
-    This provides an alternative approach to Sobolev regularization
-    by directly constraining the spectral norm of weight matrices.
-    """
-    
-    def __init__(self, module: nn.Module, name: str = 'weight', n_power_iterations: int = 1):
-        super().__init__()
-        self.module = module
-        self.name = name
-        self.n_power_iterations = n_power_iterations
-        
-        # Initialize spectral norm computation
-        weight = getattr(module, name)
-        with torch.no_grad():
-            height = weight.data.shape[0]
-            width = weight.data.view(height, -1).shape[1]
-            
-            u = nn.Parameter(torch.randn(height, 1), requires_grad=False)
-            v = nn.Parameter(torch.randn(width, 1), requires_grad=False)
-            
-            self.register_parameter(name + "_u", u)
-            self.register_parameter(name + "_v", v)
-    
-    def forward(self, *args, **kwargs):
-        """Apply spectral normalization during forward pass."""
-        weight = getattr(self.module, self.name)
-        u = getattr(self, self.name + "_u")
-        v = getattr(self, self.name + "_v")
-        
-        # Power iteration
-        with torch.no_grad():
-            for _ in range(self.n_power_iterations):
-                v = F.normalize(torch.mv(weight.data.t(), u), dim=0, out=v)
-                u = F.normalize(torch.mv(weight.data, v), dim=0, out=u)
-        
-        # Compute spectral norm
-        sigma = torch.dot(u.flatten(), torch.mv(weight, v))
-        
-        # Normalize weight by spectral norm
-        weight_normalized = weight / sigma
-        
-        # Temporarily replace weight
-        setattr(self.module, self.name, weight_normalized)
-        
-        # Forward pass
-        result = self.module(*args, **kwargs)
-        
-        # Restore original weight
-        setattr(self.module, self.name, weight)
-        
-        return result
-
-
-def apply_spectral_norm(module: nn.Module, name: str = 'weight') -> nn.Module:
-    """
-    Apply spectral normalization to a module.
-    
-    Args:
-        module (nn.Module): Module to normalize.
-        name (str): Name of weight parameter.
-    
-    Returns:
-        nn.Module: Module wrapped with spectral normalization.
-    """
-    return SpectralNormalization(module, name)
-
-
 class SobolevConstrainedCritic(nn.Module):
     """
     Critic network with built-in Sobolev space constraints.
@@ -317,20 +247,20 @@ class SobolevConstrainedCritic(nn.Module):
         # First layer
         linear1 = nn.Linear(data_dim, hidden_dim)
         if use_spectral_norm:
-            linear1 = apply_spectral_norm(linear1)
+            linear1 = spectral_norm(linear1)
         layers.extend([linear1, activation])
         
         # Hidden layers
         for _ in range(2):
             linear_hidden = nn.Linear(hidden_dim, hidden_dim)
             if use_spectral_norm:
-                linear_hidden = apply_spectral_norm(linear_hidden)
+                linear_hidden = spectral_norm(linear_hidden)
             layers.extend([linear_hidden, activation])
         
         # Output layer
         linear_out = nn.Linear(hidden_dim, 1)
         if use_spectral_norm:
-            linear_out = apply_spectral_norm(linear_out)
+            linear_out = spectral_norm(linear_out)
         layers.append(linear_out)
         
         self.model = nn.Sequential(*layers)
@@ -444,7 +374,7 @@ class SobolevWGANLoss:
     
     def __init__(
         self,
-        lambda_gp: float = 10.0,
+        lambda_gp: float = 0.5,
         lambda_sobolev: float = 0.01,
         use_adaptive_sobolev: bool = True
     ):
