@@ -55,10 +55,8 @@ class Generator(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(noise_dim, hidden_dim),
             activation,
-            nn.Dropout(0.2),  # Light dropout for regularization
             nn.Linear(hidden_dim, hidden_dim),
             activation,
-            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             activation,
             nn.Linear(hidden_dim, data_dim)
@@ -92,10 +90,8 @@ class Critic(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
             activation,
-            nn.Dropout(0.3),  # Higher dropout for critic
             nn.Linear(hidden_dim, hidden_dim),
             activation,
-            nn.Dropout(0.3),
             nn.Linear(hidden_dim, hidden_dim),
             activation,
             nn.Linear(hidden_dim, 1)
@@ -118,7 +114,7 @@ class Critic(nn.Module):
 class CongestionTracker:
     """Track congestion metrics throughout the perturbation process."""
 
-    def __init__(self, lambda_param: float = 1.0, history_size: int = 100):
+    def __init__(self, lambda_param: float = 10.0, history_size: int = 100):
         self.lambda_param = lambda_param
         self.history_size = history_size
         self.history = {
@@ -180,7 +176,7 @@ def compute_traffic_flow(
     generator: torch.nn.Module,
     noise_samples: torch.Tensor,
     sigma: torch.Tensor,
-    lambda_param: float = 0.1
+    lambda_param: float = 10.0
 ) -> Dict[str, torch.Tensor]:
     """Compute traffic flow w_Q and intensity i_Q based on critic gradients."""
     generator.eval()
@@ -230,7 +226,7 @@ def compute_traffic_flow(
 def congestion_cost_function(
     traffic_intensity: torch.Tensor,
     sigma: torch.Tensor,
-    lambda_param: float = 1.0,
+    lambda_param: float = 10.0,
     cost_type: str = 'quadratic_linear'
 ) -> torch.Tensor:
     """Compute congestion cost H(x, i) for given traffic intensity."""
@@ -357,7 +353,7 @@ class SobolevConstrainedCritic(nn.Module):
 def sample_real_data(
     batch_size: int,
     means: Optional[List] = None,
-    std: float = 0.4,
+    std: float = 0.7,
     device='cpu'
 ) -> torch.Tensor:
     """Sample from a real data distribution, such as multiple Gaussian clusters - FIXED."""
@@ -365,10 +361,11 @@ def sample_real_data(
     
     # FIXED: Use 4 clusters by default instead of single cluster
     if means is None:
-        means = [torch.tensor([2.0, 0.0], device=device, dtype=torch.float32),
-                 torch.tensor([-2.0, 0.0], device=device, dtype=torch.float32),
-                 torch.tensor([0.0, 2.0], device=device, dtype=torch.float32),
-                 torch.tensor([0.0, -2.0], device=device, dtype=torch.float32)]
+        # means = [torch.tensor([2.0, 0.0], device=device, dtype=torch.float32),
+        #          torch.tensor([-2.0, 0.0], device=device, dtype=torch.float32),
+        #          torch.tensor([0.0, 2.0], device=device, dtype=torch.float32),
+        #          torch.tensor([0.0, -2.0], device=device, dtype=torch.float32)]
+        means = [torch.tensor([0.0, 0.0], device=device, dtype=torch.float32)]
     else:
         means = [torch.tensor(m, dtype=torch.float32, device=device) for m in means]
     
@@ -630,7 +627,7 @@ class CTWeightPerturberTargetGiven:
     def perturb(
         self,
         steps: int = 20,
-        eta_init: float = 0.025,
+        eta_init: float = 0.045,
         lambda_congestion: float = 1.0,
         verbose: bool = True
     ) -> Generator:
@@ -930,7 +927,7 @@ def run_complete_demonstration():
     logging.info("\n1. Creating models...")
     generator = Generator(noise_dim=2, data_dim=2, hidden_dim=128)
     generator = generator.to(device)
-    critic = SobolevConstrainedCritic(data_dim=2, hidden_dim=128)
+    critic = SobolevConstrainedCritic(data_dim=2, hidden_dim=128, sobolev_bound=10)
     critic = critic.to(device)
     logging.info(f"✓ Generator parameters: {sum(p.numel() for p in generator.parameters())}")
     logging.info(f"✓ Critic parameters: {sum(p.numel() for p in critic.parameters())}")
@@ -1012,7 +1009,7 @@ def run_complete_demonstration():
     
     # Manual perturbation loop with visualization
     optimizer = torch.optim.Adam(pert_gen.parameters(), lr=1e-4)
-    lambda_congestion = 1.0
+    lambda_congestion = 1e-2
     
     for step in range(50):
         logging.info(f"\n--- Step {step} ---")
@@ -1063,7 +1060,7 @@ def run_complete_demonstration():
         # Optimization
         optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(pert_gen.parameters(), 1.0)
+        # torch.nn.utils.clip_grad_norm_(pert_gen.parameters(), 1.0)
         optimizer.step()
         logging.info(f"Losses: W2={w2_loss.item():.4f}, Congestion={congestion_cost.item():.4f}, Sobolev={sobolev_loss.item():.4f}")
     
@@ -1214,7 +1211,7 @@ def test_individual_components():
     try:
         noise = torch.randn(30, 2, device=device)
         sigma = torch.rand(30, device=device) + 0.1
-        flow_info = compute_traffic_flow(sobolev_crit, gen, noise, sigma, lambda_param=1.0)
+        flow_info = compute_traffic_flow(sobolev_crit, gen, noise, sigma, lambda_param=10.0)
         logging.info(f"✓ Traffic flow computed, intensity shape: {flow_info['traffic_intensity'].shape}")
         logging.info(f"✓ Mean traffic intensity: {flow_info['traffic_intensity'].mean().item():.6f}")
     except Exception as e:
@@ -1386,11 +1383,11 @@ for step in range(perturbation_steps):
     sigma = density_info['density_at_samples']
     # Compute traffic flow w_Q and intensity i_Q
     flow_info = compute_traffic_flow(
-        critic, generator, noise, sigma, lambda_param=1.0
+        critic, generator, noise, sigma, lambda_param=10.0
     )
     # Compute congestion cost H(x, i_Q)
     congestion_cost = congestion_cost_function(
-        flow_info['traffic_intensity'], sigma, lambda_param=1.0
+        flow_info['traffic_intensity'], sigma, lambda_param=10.0
     )
     print(f"Step {step}: Congestion cost = {congestion_cost.mean().item():.6f}")
 
@@ -1413,7 +1410,6 @@ visualizer.create_evolution_summary()
     logging.info("  • Removed Tanh constraints (limits natural range)")
     logging.info("  • Simplified architecture optimized for multi-cluster generation")
     logging.info("  • Improved initialization (Kaiming for ReLU networks)")
-    logging.info("  • Added dropout for proper regularization")
     logging.info("🔧 TRAINING OPTIMIZATIONS:")
     logging.info("  • Increased epochs (300→500) for thorough training")
     logging.info("  • Optimized batch size (64→256) for stability")
