@@ -1,6 +1,7 @@
 logs/
 toy_test/
 test_results/
+backup/
 src/weight_perturbation.egg-info/
 __pycache__/
 conftest.py

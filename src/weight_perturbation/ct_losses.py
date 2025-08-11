@@ -26,7 +26,7 @@ def global_w2_loss_and_grad_with_congestion(
     target_samples: torch.Tensor,
     noise_samples: torch.Tensor,
     critic: Optional[torch.nn.Module] = None,
-    lambda_congestion: float = 0.1,
+    lambda_congestion: float = 100,
     lambda_sobolev: float = 0.01,
     track_congestion: bool = True,
     map_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = barycentric_ot_map,
@@ -167,7 +167,7 @@ def multi_marginal_ot_loss_with_congestion(
     lambda_virtual: float = 0.8,
     lambda_multi: float = 1.0,
     lambda_entropy: float = 0.012,
-    lambda_congestion: float = 0.1,
+    lambda_congestion: float = 100,
     lambda_sobolev: float = 0.01,
     track_congestion: bool = True
 ) -> Tuple[torch.Tensor, Optional[Dict[str, List[Dict]]]]:

@@ -434,10 +434,10 @@ def compute_gradient_penalty(critic, real_samples, fake_samples, device):
 def pretrain_wgan_gp(
     generator, critic, real_sampler,
     epochs: int = 300,
-    batch_size: int = 64,
+    batch_size: int = 96,
     lr: float = 2e-4,
-    betas=(0.0, 0.9),
-    gp_lambda: float = 10.0,
+    betas=(0.5, 0.95),
+    gp_lambda: float = 0.5,
     critic_iters: int = 5,
     noise_dim: int = 2,
     device='cpu',
@@ -557,7 +557,7 @@ class CTWeightPerturberTargetGiven:
                 ).mean()
                 
                 # Add to total loss
-                total_loss += 0.1 * congestion_cost
+                total_loss = total_loss + 0.1 * congestion_cost
                 
                 # Store congestion info
                 congestion_info = {
@@ -832,7 +832,7 @@ def run_complete_demonstration():
     real_sampler = lambda bs: sample_real_data(bs, device=device)
     generator, critic = pretrain_wgan_gp(
         generator, critic, real_sampler,
-        epochs=100, batch_size=64, device=device, verbose=True
+        epochs=300, batch_size=96, device=device, verbose=True
     )
     logging.info("✓ Pretraining completed")
     
@@ -1147,7 +1147,7 @@ critic = Critic(data_dim=2, hidden_dim=256).to(device)
 
 real_sampler = lambda bs: sample_real_data(bs, device=device)
 pretrained_gen, _ = pretrain_wgan_gp(
-    generator, critic, real_sampler, epochs=100, device=device
+    generator, critic, real_sampler, epochs=300, device=device
 )
 # Create target and perturb
 target_samples = sample_target_data(1000, shift=[1.5, 1.5], device=device)

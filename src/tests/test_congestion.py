@@ -97,7 +97,7 @@ class CongestedTransportVisualizer:
 
             # Compute traffic flow for this domain
             flow_info = compute_traffic_flow(
-                critic, generator, noise_samples, sigma_gen, lambda_param=0.1
+                critic, generator, noise_samples, sigma_gen, lambda_param=100
             )
 
             domain_flows.append({
@@ -569,16 +569,16 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Section 3: Evidence-Based Perturbation with Multi-Marginal Flow Visualization")
     parser.add_argument("--seed", type=int, default=2025, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="Device to use")
-    parser.add_argument("--pretrain_epochs", type=int, default=100, help="Pretraining epochs")
-    parser.add_argument("--perturb_epochs", type=int, default=25, help="Perturbation epochs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Training batch size")
-    parser.add_argument("--eval_batch_size", type=int, default=300, help="Evaluation batch size")
+    parser.add_argument("--pretrain_epochs", type=int, default=150, help="Pretraining epochs")
+    parser.add_argument("--perturb_epochs", type=int, default=30, help="Perturbation epochs")
+    parser.add_argument("--batch_size", type=int, default=96, help="Training batch size")
+    parser.add_argument("--eval_batch_size", type=int, default=600, help="Evaluation batch size")
     parser.add_argument("--num_evidence_domains", type=int, default=3, help="Number of evidence domains")
     parser.add_argument("--samples_per_domain", type=int, default=40, help="Samples per evidence domain")
-    parser.add_argument("--eta_init", type=float, default=0.04, help="Initial learning rate")
+    parser.add_argument("--eta_init", type=float, default=0.045, help="Initial learning rate")
     parser.add_argument("--enable_congestion", action="store_true", default=True, help="Enable congestion tracking")
     parser.add_argument("--use_sobolev_critic", action="store_true", default=True, help="Use Sobolev-constrained critics")
-    parser.add_argument("--visualize_every", type=int, default=4, help="Visualize traffic flow every N epochs")
+    parser.add_argument("--visualize_every", type=int, default=5, help="Visualize traffic flow every N epochs")
     parser.add_argument("--save_plots", action="store_true", default=True, help="Save plots")
     parser.add_argument("--verbose", action="store_true", default=True, help="Verbose output")
     return parser.parse_args()
@@ -618,7 +618,7 @@ def run_section3_example():
             critic = SobolevConstrainedCritic(
                 data_dim=2, hidden_dim=256,
                 use_spectral_norm=True,
-                lambda_sobolev=0.01,
+                lambda_sobolev=0.1,
                 sobolev_bound=1.0
             ).to(device)
         else:
@@ -638,6 +638,7 @@ def run_section3_example():
         epochs=args.pretrain_epochs,
         batch_size=args.batch_size,
         lr=2e-4,
+        gp_lambda=0.5,
         device=device,
         verbose=args.verbose
     )
@@ -737,13 +738,13 @@ def run_section3_example():
             if multi_congestion_info and multi_congestion_info['domains']:
                 avg_congestion_info = perturber._average_multi_marginal_congestion(multi_congestion_info)
                 delta_theta = perturber._compute_delta_theta_with_congestion(
-                    grads, eta, perturber.config.get('clip_norm', 0.23),
+                    grads, eta, perturber.config.get('clip_norm', 0.4),
                     perturber.config.get('momentum', 0.975),
                     delta_theta_prev, avg_congestion_info
                 )
             else:
                 delta_theta = perturber._compute_delta_theta(
-                    grads, eta, perturber.config.get('clip_norm', 0.23),
+                    grads, eta, perturber.config.get('clip_norm', 0.4),
                     perturber.config.get('momentum', 0.975),
                     delta_theta_prev
                 )
