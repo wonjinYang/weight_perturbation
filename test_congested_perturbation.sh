@@ -1137,7 +1137,7 @@ main() {
     print_status "RUNNING INDIVIDUAL TESTS: ${INDIVIDUAL_TESTS[*]}" $CYAN
   fi
   
-  print_status "Starting comprehensive testing suite..." $NC
+  print_status "Starting testing suite..." $NC
   
   # Check dependencies
   print_debug "Checking dependencies..."
