@@ -60,19 +60,19 @@ class CTWeightPerturber(ABC):
             self.config = config
             
         self.noise_dim = self.config.get('noise_dim', 2)
-        self.eval_batch_size = self.config.get('eval_batch_size', 400)  # Reduced default
+        self.eval_batch_size = self.config.get('eval_batch_size', 600)  # Reduced default
         
         # Initialize congestion tracking
         if self.enable_congestion_tracking:
             self.congestion_tracker = CongestionTracker(
-                lambda_param=self.config.get('lambda_congestion', 0.05)  # Reduced default
+                lambda_param=self.config.get('lambda_congestion', 1.0)  # Reduced default
             )
         
         # Initialize loss function with stable parameters
         self.loss_function = CongestionAwareLossFunction(
-            lambda_congestion=min(self.config.get('lambda_congestion', 0.05), 0.1),    # Reduced
-            lambda_sobolev=min(self.config.get('lambda_sobolev', 0.005), 0.01),       # Reduced
-            lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.01)        # Reduced
+            lambda_congestion=min(self.config.get('lambda_congestion', 1.0), 2.0),    # Reduced
+            lambda_sobolev=min(self.config.get('lambda_sobolev', 0.1), 2.0),       # Reduced
+            lambda_entropy=min(self.config.get('lambda_entropy', 0.012), 0.5)        # Reduced
         )
         
         # Initialize common parameters
@@ -82,20 +82,20 @@ class CTWeightPerturber(ABC):
         """Get default configuration with stability."""
         return {
             'noise_dim': 2,
-            'eval_batch_size': 400,      # Reduced
-            'eta_init': 0.008,           # Significantly reduced
+            'eval_batch_size': 600,      # Reduced
+            'eta_init': 0.045,           # Significantly reduced
             'eta_min': 1e-6,             # Lower minimum
-            'eta_max': 0.05,             # Lower maximum
-            'eta_decay_factor': 0.98,    # Less aggressive
-            'eta_boost_factor': 1.01,    # Very conservative
-            'clip_norm': 0.1,            # Strong clipping
+            'eta_max': 0.5,             # Lower maximum
+            'eta_decay_factor': 0.9,    # Less aggressive
+            'eta_boost_factor': 1.05,    # Very conservative
+            'clip_norm': 0.4,            # Strong clipping
             'momentum': 0.85,            # Reduced momentum
             'patience': 12,              # Increased patience
             'rollback_patience': 6,      # Increased rollback patience
             'improvement_threshold': 1e-5,   # More lenient
-            'lambda_congestion': 0.03,   # Reduced
-            'lambda_sobolev': 0.003,     # Reduced
-            'lambda_entropy': 0.003,     # Reduced
+            'lambda_congestion': 1.0,   # Reduced
+            'lambda_sobolev': 0.1,     # Reduced
+            'lambda_entropy': 0.012,     # Reduced
             'congestion_threshold': 0.3, # Higher threshold
         }
     
@@ -172,7 +172,7 @@ class CTWeightPerturber(ABC):
             torch.Tensor: Computed delta_theta.
         """
         # Gradient preprocessing
-        grads = torch.clamp(grads, min=-2.0, max=2.0)  # Stronger clamping
+        # grads = torch.clamp(grads, min=-2.0, max=2.0)  # Stronger clamping
         
         # Check for problematic gradients
         if torch.isnan(grads).any() or torch.isinf(grads).any():
@@ -187,31 +187,31 @@ class CTWeightPerturber(ABC):
         
         delta_theta = -eta * grads
         
-        # Apply congestion-based scaling if available (with conservation)
-        if congestion_info is not None and 'traffic_intensity' in congestion_info:
-            try:
-                # More conservative congestion-based adaptation
-                traffic_intensity = congestion_info['traffic_intensity'].mean()
-                sigma_mean = congestion_info['spatial_density'].mean()
-                lambda_param = min(self.config.get('lambda_congestion', 0.05), 0.1)
+        # # Apply congestion-based scaling if available (with conservation)
+        # if congestion_info is not None and 'traffic_intensity' in congestion_info:
+        #     try:
+        #         # More conservative congestion-based adaptation
+        #         traffic_intensity = congestion_info['traffic_intensity'].mean()
+        #         sigma_mean = congestion_info['spatial_density'].mean()
+        #         lambda_param = min(self.config.get('lambda_congestion', 1.0), 2.0)
                 
-                # Second derivative computation with stability
-                h_second = 1.0 / (lambda_param * sigma_mean + 1e-5)
-                h_second = min(float(h_second), 50.0)  # Cap influence
+        #         # Second derivative computation with stability
+        #         h_second = 1.0 / (lambda_param * sigma_mean + 1e-5)
+        #         h_second = min(float(h_second), 50.0)  # Cap influence
                 
-                # Much more conservative adaptive scaling
-                congestion_factor = 0.05 * h_second * traffic_intensity  # Reduced from 0.1
-                congestion_scale = 1.0 / (1.0 + congestion_factor)
-                congestion_scale = max(0.2, min(congestion_scale, 1.5))  # Tighter bounds
+        #         # Much more conservative adaptive scaling
+        #         congestion_factor = 0.5 * h_second * traffic_intensity  # Reduced from 0.1
+        #         congestion_scale = 1.0 / (1.0 + congestion_factor)
+        #         congestion_scale = max(0.2, min(congestion_scale, 1.5))  # Tighter bounds
                 
-                delta_theta = delta_theta * congestion_scale
+        #         delta_theta = delta_theta * congestion_scale
                 
-                # Additional stability check for congestion adaptation
-                if traffic_intensity > 10.0:  # Very high congestion
-                    delta_theta = delta_theta * 0.5  # Additional dampening
+        #         # Additional stability check for congestion adaptation
+        #         if traffic_intensity > 10.0:  # Very high congestion
+        #             delta_theta = delta_theta * 0.5  # Additional dampening
                     
-            except Exception as e:
-                print(f"Warning: Congestion adaptation failed: {e}")
+        #     except Exception as e:
+        #         print(f"Warning: Congestion adaptation failed: {e}")
         
         # Clipping with parameter-count aware scaling
         norm = delta_theta.norm()
@@ -329,9 +329,9 @@ class CTWeightPerturber(ABC):
             Tuple[float, int]: (new_eta, updated_no_improvement_count)
         """
         eta_min = max(self.config.get('eta_min', 1e-6), 1e-7)      # Lower minimum
-        eta_max = min(self.config.get('eta_max', 0.05), 0.1)       # Lower maximum
+        eta_max = min(self.config.get('eta_max', 0.5), 0.1)       # Lower maximum
         eta_decay_factor = max(self.config.get('eta_decay_factor', 0.98), 0.95)   # Conservative
-        eta_boost_factor = min(self.config.get('eta_boost_factor', 1.01), 1.03)   # Very conservative
+        eta_boost_factor = min(self.config.get('eta_boost_factor', 1.01), 1.5)   # Very conservative
         improvement_threshold = self.config.get('improvement_threshold', 1e-5)
         
         # Adaptive threshold based on loss magnitude
@@ -410,7 +410,7 @@ class CTWeightPerturber(ABC):
         
         # Additional congestion check
         if self.enable_congestion_tracking and self.congestion_tracker:
-            congestion_threshold = max(self.config.get('congestion_threshold', 0.3), 0.4)  # Higher threshold
+            congestion_threshold = max(self.config.get('congestion_threshold', 0.3), 0.1)  # Higher threshold
             if self.congestion_tracker.check_congestion_increase(congestion_threshold):
                 print("Rollback triggered due to excessive congestion increase")
                 return True
@@ -577,12 +577,12 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             self.target_samples, 
             noise,
             critic=self.critic,
-            lambda_congestion=min(self.config.get('lambda_congestion', 0.05), 0.1),
-            lambda_sobolev=min(self.config.get('lambda_sobolev', 0.005), 0.01),
+            lambda_congestion=min(self.config.get('lambda_congestion', 1.0), 10.0),
+            lambda_sobolev=min(self.config.get('lambda_sobolev', 0.1), 0.5),
             track_congestion=True,
             use_direct_w2=True,
-            w2_weight=0.9,  # Increased W2 weight for stability
-            map_weight=0.1   # Reduced mapping weight
+            w2_weight=1.0,  # Increased W2 weight for stability
+            map_weight=0.5   # Reduced mapping weight
         )
         return loss, grads, congestion_info
     
@@ -604,8 +604,8 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             critic=self.critic,
             track_congestion=False,
             use_direct_w2=True,
-            w2_weight=0.9,
-            map_weight=0.1
+            w2_weight=1.0,
+            map_weight=0.5,
         )
         return loss, grads
     
@@ -646,15 +646,15 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
         
         return w2_pert.item(), improvement
     
-    def perturb(self, steps: int = 50, eta_init: float = 0.008, clip_norm: float = 0.1,
+    def perturb(self, steps: int = 50, eta_init: float = 0.045, clip_norm: float = 0.3,
                 momentum: float = 0.85, patience: int = 12, verbose: bool = True) -> Generator:
         """
         Perform the perturbation process with superior stability.
         
         Args:
             steps (int): Number of perturbation steps. Defaults to 50.
-            eta_init (float): Initial learning rate. Defaults to 0.008.
-            clip_norm (float): Gradient clipping norm. Defaults to 0.1.
+            eta_init (float): Initial learning rate. Defaults to 0.045.
+            clip_norm (float): Gradient clipping norm. Defaults to 0.3.
             momentum (float): Momentum factor. Defaults to 0.85.
             patience (int): Maximum patience. Defaults to 12.
             verbose (bool): Print progress. Defaults to True.
@@ -901,13 +901,13 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 # Compute traffic flow for this domain with much reduced lambda
                 flow_info = compute_traffic_flow(
                     critic, pert_gen, noise_samples, sigma_gen,
-                    lambda_param=min(self.config.get('lambda_congestion', 0.05), 0.08)  # Much reduced
+                    lambda_param=min(self.config.get('lambda_congestion', 1.0), 2.0)  # Much reduced
                 )
                 
                  # Compute congestion cost without restrictive clamping  
                 raw_congestion_cost = congestion_cost_function(
                     flow_info['traffic_intensity'], sigma_gen,
-                    lambda_param=min(self.config.get('lambda_congestion', 0.05), 0.08)
+                    lambda_param=min(self.config.get('lambda_congestion', 1.0), 2.0)
                 )
                 
                 # Apply mean reduction
@@ -1084,17 +1084,17 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             ot_orig = multi_marginal_ot_loss(
                 orig_out, self.evidence_list, virtual_samples,
                 blur=0.2,  # Larger blur for stability
-                lambda_virtual=min(self.config.get('lambda_virtual', 0.5), 0.8),
-                lambda_multi=min(self.config.get('lambda_multi', 0.7), 0.8),
-                lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.01)
+                lambda_virtual=min(self.config.get('lambda_virtual', 0.5), 2.0),
+                lambda_multi=min(self.config.get('lambda_multi', 0.7), 2.0),
+                lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.5)
             ).item()
 
             ot_pert = multi_marginal_ot_loss(
                 pert_out, self.evidence_list, virtual_samples,
                 blur=0.2,
-                lambda_virtual=min(self.config.get('lambda_virtual', 0.5), 0.8),
-                lambda_multi=min(self.config.get('lambda_multi', 0.7), 0.8),
-                lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.01)
+                lambda_virtual=min(self.config.get('lambda_virtual', 0.5), 2.0),
+                lambda_multi=min(self.config.get('lambda_multi', 0.7), 2.0),
+                lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.5)
             ).item()
             
         except Exception as e:
@@ -1125,9 +1125,9 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         
         return ot_pert, improvement
     
-    def perturb(self, epochs: int = 30, eta_init: float = 0.008, clip_norm: float = 0.1,
-                momentum: float = 0.85, patience: int = 12, lambda_entropy: float = 0.003,
-                lambda_virtual: float = 0.5, lambda_multi: float = 0.7, verbose: bool = True) -> Generator:
+    def perturb(self, epochs: int = 50, eta_init: float = 0.045, clip_norm: float = 0.4,
+                momentum: float = 0.85, patience: int = 12, lambda_entropy: float = 0.012,
+                lambda_virtual: float = 0.8, lambda_multi: float = 1.0, verbose: bool = True) -> Generator:
         """
         Perform the perturbation process with superior stability.
         

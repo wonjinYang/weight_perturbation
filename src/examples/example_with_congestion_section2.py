@@ -13,9 +13,6 @@ import torch
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable
 import seaborn as sns
 from pathlib import Path
 
@@ -33,6 +30,7 @@ try:
         compute_spatial_density,
         compute_traffic_flow,
         compute_convergence_metrics,
+        parameters_to_vector,
         set_seed,
         compute_device,
         check_theoretical_support
@@ -86,7 +84,7 @@ class TrafficFlowVisualizer:
         
         # Compute traffic flow
         flow_info = compute_traffic_flow(
-            critic, generator, noise_samples, sigma, lambda_param=0.1
+            critic, generator, noise_samples, sigma, lambda_param=1.
         )
         
         # Store step data for analysis
@@ -124,13 +122,13 @@ class TrafficFlowVisualizer:
         intensity_np = flow_info['traffic_intensity'].detach().cpu().numpy()
         
         # Subsample for cleaner visualization
-        subsample_idx = np.random.choice(len(samples_np), min(100, len(samples_np)), replace=False)
+        # subsample_idx = np.random.choice(len(samples_np), min(100, len(samples_np)), replace=False)
         
         # Create quiver plot for traffic flow vectors
         quiver = ax2.quiver(
-            samples_np[subsample_idx, 0], samples_np[subsample_idx, 1],
-            flow_np[subsample_idx, 0], flow_np[subsample_idx, 1],
-            intensity_np[subsample_idx],
+            samples_np[:, 0], samples_np[:, 1],
+            flow_np[:, 0], flow_np[:, 1],
+            intensity_np,
             cmap='viridis', scale=1.0, scale_units='xy', angles='xy',
             width=0.003, alpha=0.8
         )
@@ -383,14 +381,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Section 2: Target-Given Perturbation with Traffic Flow Visualization")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="Device to use")
-    parser.add_argument("--pretrain_epochs", type=int, default=150, help="Pretraining epochs")
-    parser.add_argument("--perturb_steps", type=int, default=20, help="Perturbation steps")
-    parser.add_argument("--batch_size", type=int, default=64, help="Training batch size")
-    parser.add_argument("--eval_batch_size", type=int, default=400, help="Evaluation batch size")
-    parser.add_argument("--eta_init", type=float, default=0.025, help="Initial learning rate")
+    parser.add_argument("--pretrain_epochs", type=int, default=300, help="Pretraining epochs")
+    parser.add_argument("--perturb_steps", type=int, default=50, help="Perturbation steps")
+    parser.add_argument("--batch_size", type=int, default=96, help="Training batch size")
+    parser.add_argument("--eval_batch_size", type=int, default=600, help="Evaluation batch size")
+    parser.add_argument("--eta_init", type=float, default=0.045, help="Initial learning rate")
     parser.add_argument("--enable_congestion", action="store_true", default=True, help="Enable congestion tracking")
     parser.add_argument("--use_sobolev_critic", action="store_true", default=True, help="Use Sobolev-constrained critic")
-    parser.add_argument("--visualize_every", type=int, default=3, help="Visualize traffic flow every N steps")
+    parser.add_argument("--visualize_every", type=int, default=5, help="Visualize traffic flow every N steps")
     parser.add_argument("--save_plots", action="store_true", default=True, help="Save plots")
     parser.add_argument("--verbose", action="store_true", default=True, help="Verbose output")
     return parser.parse_args()
@@ -427,8 +425,8 @@ def run_section2_example():
         critic = SobolevConstrainedCritic(
             data_dim=2, hidden_dim=256,
             use_spectral_norm=True, 
-            lambda_sobolev=0.01,
-            sobolev_bound=1.0
+            lambda_sobolev=0.1,
+            sobolev_bound=50.0
         ).to(device)
         print("Using Sobolev-constrained critic with spectral normalization")
     else:
@@ -438,8 +436,9 @@ def run_section2_example():
     
     # Pretrain models
     print(f"\nPretraining for {args.pretrain_epochs} epochs...")
+    means = [torch.tensor([0.0, 0.0], device=device, dtype=torch.float32)]
     real_sampler = lambda bs: sample_real_data(
-        bs, means=None, std=0.4, device=device  # Default 4 clusters
+        bs, means=means, std=0.7, device=device 
     )
     
     pretrained_gen, pretrained_critic = pretrain_wgan_gp(
@@ -447,6 +446,8 @@ def run_section2_example():
         epochs=args.pretrain_epochs,
         batch_size=args.batch_size,
         lr=2e-4,
+        gp_lambda=0.,
+        betas=(0., 0.95),
         device=device,
         verbose=args.verbose
     )
@@ -455,7 +456,7 @@ def run_section2_example():
     print("\nCreating target distribution...")
     target_samples = sample_target_data(
         batch_size=args.eval_batch_size,
-        shift=[1.8, 1.8],  # Significant shift for clear traffic flow
+        shift=[2., 2.],  # Significant shift for clear traffic flow
         device=device
     )
     
@@ -473,6 +474,24 @@ def run_section2_example():
         enable_congestion_tracking=args.enable_congestion
     )
     
+    perturber.config.update({
+        'eta_init': args.eta_init,           # Significantly reduced learning rate
+        'eta_min': 1e-6,             # Lower minimum
+        'eta_max': 0.5,             # Lower maximum
+        'eta_decay_factor': 0.9,    # Less aggressive decay
+        'eta_boost_factor': 1.05,    # Very conservative boost
+        'clip_norm': 0.4,            # Strong clipping
+        'momentum': 0.85,            # Reduced momentum
+        'patience': 15,              # Increased patience
+        'rollback_patience': 10,      # Increased rollback patience
+        'lambda_entropy': 0.012,     # Reduced entropy
+        'lambda_virtual': 0.8,       # Reduced virtual weight
+        'lambda_multi': 1.0,         # Reduced multi weight
+        'lambda_congestion': 10.0,   # Reduced congestion parameter
+        'lambda_sobolev': 0.1,     # Reduced Sobolev parameter
+        'eval_batch_size': args.eval_batch_size
+    })
+
     # Custom perturbation loop with traffic flow visualization
     print(f"\nStarting perturbation with traffic flow visualization...")
     print(f"Will visualize every {args.visualize_every} steps")
@@ -480,17 +499,23 @@ def run_section2_example():
     try:
         data_dim = target_samples.shape[1]
         pert_gen = perturber._create_generator_copy(data_dim)
-        
+        pretrained_critic.eval()
+
         # Initialize perturbation state
-        from weight_perturbation.utils import parameters_to_vector, vector_to_parameters
         theta_prev = parameters_to_vector(pert_gen.parameters()).clone()
         delta_theta_prev = torch.zeros_like(theta_prev)
         eta = args.eta_init
         best_vec = None
         best_w2 = float('inf')
-        
+        loss_hist = []
+        w2_hist = []
+        no_improvement_count = 0
+        consecutive_rollbacks = 0
+
         # Main perturbation loop with visualization
         for step in range(args.perturb_steps):
+            pretrained_gen.train()
+
             # Generate noise for this step
             noise_samples = torch.randn(args.eval_batch_size, 2, device=device)
             
@@ -520,12 +545,14 @@ def run_section2_example():
                 
                 # Compute delta_theta with congestion awareness
                 delta_theta = perturber._compute_delta_theta_with_congestion(
-                    grads, eta, 0.15, 0.85, delta_theta_prev, congestion_info
+                    grads, eta, 0.2, 0.85, delta_theta_prev, congestion_info
                 )
             else:
                 loss, grads = perturber._compute_loss_and_grad(pert_gen)
-                delta_theta = perturber._compute_delta_theta(grads, eta, 0.15, 0.85, delta_theta_prev)
+                delta_theta = perturber._compute_delta_theta(grads, eta, 0.2, 0.85, delta_theta_prev)
                 
+                loss_hist.append(loss.item())
+
                 # Visualize without congestion info
                 if step % args.visualize_every == 0:
                     step_data = visualizer.visualize_traffic_flow_step(
@@ -538,11 +565,35 @@ def run_section2_example():
             delta_theta_prev = delta_theta.clone()
             
             # Validate and adapt
-            w2_pert, improvement = perturber._validate_and_adapt(pert_gen, eta, [], 15, args.verbose, step)
+            w2_pert, improvement = perturber._validate_and_adapt(pert_gen, eta, w2_hist, 15, args.verbose, step)
             
             # Update best state
             best_w2, best_vec = perturber._update_best_state(w2_pert, pert_gen, best_w2, best_vec)
             
+            # Adapt learning rate
+            eta, no_improvement_count = perturber._adapt_learning_rate(eta, improvement, step, no_improvement_count, loss_hist)
+
+            
+            # Check for rollback condition
+            if perturber._check_rollback_condition_with_congestion(w2_hist, no_improvement_count):
+                if args.verbose:
+                    print(f"Rollback triggered at step {step}")
+                
+                perturber._restore_best_state(pert_gen, best_vec)
+                # Reset parameters after rollback
+                eta = max(eta * 0.9, perturber.config.get('eta_min', 1e-6))
+                no_improvement_count = 0
+                consecutive_rollbacks += 1
+                delta_theta_prev = torch.zeros_like(delta_theta_prev)
+                
+                # If too many rollbacks, break early
+                if consecutive_rollbacks >= 3:  # Reduced from 5
+                    if args.verbose:
+                        print(f"Too many rollbacks, stopping early")
+                    break
+            else:
+                consecutive_rollbacks = 0
+
             # Print progress
             if args.verbose:
                 log_msg = f"[{step:2d}] W2={w2_pert:.4f} Improvement={improvement:.4f} eta={eta:.6f}"

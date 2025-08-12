@@ -23,7 +23,7 @@ class CongestionTracker:
     monitoring traffic intensity, flow divergence, and continuity equation satisfaction.
     """
     
-    def __init__(self, lambda_param: float = 0.1, history_size: int = 100):
+    def __init__(self, lambda_param: float = 1.0, history_size: int = 100):
         self.lambda_param = lambda_param
         self.history_size = history_size
         self.history = {
@@ -87,7 +87,7 @@ class CongestionTracker:
 
 def compute_spatial_density(
     samples: torch.Tensor,
-    bandwidth: float = 0.1,
+    bandwidth: float = 0.2,
     grid_size: int = 50,
     domain_bounds: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 ) -> Dict[str, torch.Tensor]:
@@ -99,7 +99,7 @@ def compute_spatial_density(
     
     Args:
         samples (torch.Tensor): Sample points, shape (n_samples, data_dim).
-        bandwidth (float): KDE bandwidth parameter. Defaults to 0.1.
+        bandwidth (float): KDE bandwidth parameter. Defaults to 0.2.
         grid_size (int): Number of grid points per dimension. Defaults to 50.
         domain_bounds (Optional[Tuple[torch.Tensor, torch.Tensor]]): Min and max bounds for domain.
             If None, computed from samples with padding.
@@ -180,7 +180,7 @@ def compute_traffic_flow(
     generator: torch.nn.Module,
     noise_samples: torch.Tensor,
     sigma: torch.Tensor,
-    lambda_param: float = 0.1
+    lambda_param: float = 1.0
 ) -> Dict[str, torch.Tensor]:
     """
     Compute traffic flow w_Q and intensity i_Q based on critic gradients.
@@ -193,7 +193,7 @@ def compute_traffic_flow(
         generator (torch.nn.Module): Generator model.
         noise_samples (torch.Tensor): Noise input samples.
         sigma (torch.Tensor): Spatial density values.
-        lambda_param (float): Congestion parameter λ. Defaults to 0.1.
+        lambda_param (float): Congestion parameter λ. Defaults to 1.0.
     
     Returns:
         Dict[str, torch.Tensor]: Dictionary containing:
@@ -281,7 +281,7 @@ class QuadraticLinearCost(CongestionCostFunction):
     Quadratic-linear congestion cost: H(x, z) = (1/2λσ(x))z² + |z|
     """
     
-    def __init__(self, lambda_param: float = 0.1):
+    def __init__(self, lambda_param: float = 1.0):
         self.lambda_param = lambda_param
     
     def __call__(self, traffic_intensity: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -333,7 +333,7 @@ class LogarithmicCost(CongestionCostFunction):
 def congestion_cost_function(
     traffic_intensity: torch.Tensor,
     sigma: torch.Tensor,
-    lambda_param: float = 0.1,
+    lambda_param: float = 1.0,
     cost_type: str = 'quadratic_linear'
 ) -> torch.Tensor:
     """
@@ -344,7 +344,7 @@ def congestion_cost_function(
     Args:
         traffic_intensity (torch.Tensor): Traffic intensity i_Q(x).
         sigma (torch.Tensor): Spatial density σ(x).
-        lambda_param (float): Congestion parameter. Defaults to 0.1.
+        lambda_param (float): Congestion parameter. Defaults to 1.0.
         cost_type (str): Type of cost function. Defaults to 'quadratic_linear'.
     
     Returns:

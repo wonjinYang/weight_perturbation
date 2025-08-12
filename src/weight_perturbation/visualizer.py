@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 class CongestedTransportVisualizer:
     """Comprehensive visualization for congested transport analysis."""
 
-    def __init__(self, save_dir="congestion_analysis"):
+    def __init__(self, save_dir="test_results/plots/congestion_analysis"):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
         self.step_data = []

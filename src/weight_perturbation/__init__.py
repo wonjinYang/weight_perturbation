@@ -92,7 +92,8 @@ try:
 
     # Visualization of congestion tracking
     from .visualizer import (
-        CongestedTransportVisualizer
+        CongestedTransportVisualizer,
+        MultiMarginalCongestedTransportVisualizer
     )
     
     _THEORETICAL_COMPONENTS_AVAILABLE = True
@@ -157,6 +158,10 @@ if _THEORETICAL_COMPONENTS_AVAILABLE:
         'CTWeightPerturberTargetNotGiven',
         'CongestionAwareWeightPerturberTargetGiven',
         'CongestionAwareWeightPerturberTargetNotGiven'
+
+        # Advanced visualizer
+        'CongestedTransportVisualizer',
+        'MultiMarginalCongestedTransportVisualizer',
     ])
 
 

@@ -23,9 +23,9 @@ class WeightedSobolevRegularizer:
     Modified for numerical stability.
     """
     
-    def __init__(self, lambda_sobolev: float = 0.01, gradient_penalty_weight: float = 0.5):
+    def __init__(self, lambda_sobolev: float = 0.1, gradient_penalty_weight: float = 1.0):
         # Clamp parameters for stability
-        self.lambda_sobolev = max(0.001, min(lambda_sobolev, 0.1))
+        self.lambda_sobolev = max(0.001, min(lambda_sobolev, 0.5))
         self.gradient_penalty_weight = max(0.1, min(gradient_penalty_weight, 2.0))
     
     def __call__(
@@ -114,8 +114,8 @@ class AdaptiveSobolevRegularizer(WeightedSobolevRegularizer):
     
     def __init__(
         self,
-        lambda_sobolev: float = 0.01,
-        gradient_penalty_weight: float = 0.5,
+        lambda_sobolev: float = 0.1,
+        gradient_penalty_weight: float = 1.0,
         adaptation_factor: float = 0.2,  # Reduced adaptation factor
         congestion_threshold: float = 0.2  # Higher threshold
     ):
@@ -453,8 +453,8 @@ class SobolevWGANLoss:
     
     def __init__(
         self,
-        lambda_gp: float = 0.5,
-        lambda_sobolev: float = 0.01,
+        lambda_gp: float = 1.0,
+        lambda_sobolev: float = 0.1,
         use_adaptive_sobolev: bool = True
     ):
         # Clamp parameters for stability

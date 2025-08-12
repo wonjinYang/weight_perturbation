@@ -897,7 +897,7 @@ def run_complete_demonstration():
         
         # Add Sobolev regularization
         sobolev_loss = critic.sobolev_regularization_loss(gen_samples, sigma)
-        total_loss = w2_loss + congestion_cost + sobolev_loss
+        total_loss = w2_loss * congestion_cost + sobolev_loss
         
         # Optimization
         optimizer.zero_grad()

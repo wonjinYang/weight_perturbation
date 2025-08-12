@@ -26,13 +26,13 @@ def global_w2_loss_and_grad_with_congestion(
     target_samples: torch.Tensor,
     noise_samples: torch.Tensor,
     critic: Optional[torch.nn.Module] = None,
-    lambda_congestion: float = 100,
-    lambda_sobolev: float = 0.01,
+    lambda_congestion: float = 1.0,
+    lambda_sobolev: float = 0.1,
     track_congestion: bool = True,
     map_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = barycentric_ot_map,
     use_direct_w2: bool = True,
-    w2_weight: float = 0.7,
-    map_weight: float = 0.3
+    w2_weight: float = 1.0,
+    map_weight: float = 0.5
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
     """
     Enhanced version of global_w2_loss_and_grad with congestion tracking.
@@ -96,16 +96,18 @@ def global_w2_loss_and_grad_with_congestion(
             flow_info = compute_traffic_flow(
                 critic, generator, noise_samples, sigma, lambda_congestion
             )
-            
-            # Add Sobolev regularization
-            sobolev_loss = sobolev_regularization(critic, gen_out, sigma, lambda_sobolev)
-            total_loss += sobolev_loss
-            
+
             # Compute congestion cost
             congestion_cost = congestion_cost_function(
                 flow_info['traffic_intensity'], sigma, lambda_congestion
             ).mean()
-            
+            total_loss *= congestion_cost
+
+
+            # Add Sobolev regularization
+            sobolev_loss = sobolev_regularization(critic, gen_out, sigma, lambda_sobolev)
+            total_loss += sobolev_loss
+
             # Store congestion information
             congestion_info = {
                 'spatial_density': sigma,
@@ -167,8 +169,8 @@ def multi_marginal_ot_loss_with_congestion(
     lambda_virtual: float = 0.8,
     lambda_multi: float = 1.0,
     lambda_entropy: float = 0.012,
-    lambda_congestion: float = 100,
-    lambda_sobolev: float = 0.01,
+    lambda_congestion: float = 1.0,
+    lambda_sobolev: float = 0.1,
     track_congestion: bool = True
 ) -> Tuple[torch.Tensor, Optional[Dict[str, List[Dict]]]]:
     """
@@ -243,7 +245,8 @@ def multi_marginal_ot_loss_with_congestion(
                 congestion_cost = congestion_cost_function(
                     flow_info['traffic_intensity'], sigma_gen, lambda_congestion
                 ).mean()
-                
+                loss_multi *= congestion_cost
+
                 # Add Sobolev regularization for this domain
                 sobolev_loss = sobolev_regularization(critic, generator_outputs, sigma_gen, lambda_sobolev)
                 loss_multi += sobolev_loss
@@ -298,8 +301,8 @@ class CongestionAwareLossFunction:
     
     def __init__(
         self,
-        lambda_congestion: float = 0.1,
-        lambda_sobolev: float = 0.01,
+        lambda_congestion: float = 1.0,
+        lambda_sobolev: float = 0.1,
         lambda_entropy: float = 0.012,
         congestion_cost_type: str = 'quadratic_linear',
         use_adaptive_weights: bool = True
