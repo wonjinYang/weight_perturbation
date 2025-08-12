@@ -89,6 +89,11 @@ try:
         CongestionAwareWeightPerturberTargetGiven,
         CongestionAwareWeightPerturberTargetNotGiven
     )
+
+    # Visualization of congestion tracking
+    from .visualizer import (
+        CongestedTransportVisualizer
+    )
     
     _THEORETICAL_COMPONENTS_AVAILABLE = True
     

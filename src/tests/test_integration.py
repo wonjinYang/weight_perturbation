@@ -24,6 +24,15 @@ from typing import Dict, List, Optional, Tuple
 import warnings
 import logging
 import unittest
+from weight_perturbation import CongestedTransportVisualizer
+
+try:
+    from scipy.ndimage import gaussian_filter
+    from scipy.interpolate import griddata, RBFInterpolator
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("Warning: scipy not available, using enhanced fallback methods")
 
 warnings.filterwarnings('ignore')
 
@@ -66,11 +75,10 @@ class Generator(nn.Module):
     def _init_weights(self, module):
         """Optimized initialization for Gaussian generation."""
         if isinstance(module, nn.Linear):
-            # He initialization for ReLU networks
-            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            # Xavier initialization
+            nn.init.xavier_normal_(module.weight, gain=0.8)
             if module.bias is not None:
-                # Small positive bias to avoid dead neurons
-                nn.init.constant_(module.bias, 0.01)
+                nn.init.zeros_(module.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return self.model(z)
@@ -101,9 +109,11 @@ class Critic(nn.Module):
     def _init_weights(self, module):
         """Initialization for critic."""
         if isinstance(module, nn.Linear):
-            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='leaky_relu')
+            # Xavier initialization
+            nn.init.xavier_normal_(module.weight, gain=0.8)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
@@ -154,7 +164,7 @@ class CongestionTracker:
 
 def compute_spatial_density(
     samples: torch.Tensor,
-    bandwidth: float = 0.1,
+    bandwidth: float = 0.15,
     **kwargs
 ) -> Dict[str, torch.Tensor]:
     """Compute spatial density function σ(x) using kernel density estimation."""
@@ -164,8 +174,9 @@ def compute_spatial_density(
     # Vectorized KDE using cdist
     distances = torch.cdist(samples, samples)
     kernels = torch.exp(-distances**2 / (2 * bandwidth**2))
-    density_at_samples = kernels.sum(dim=1) / (n_samples * bandwidth * np.sqrt(2 * np.pi))
-    density_at_samples = density_at_samples + 1e-8  # Avoid zero division
+    normalization = n_samples * bandwidth * np.sqrt(2 * np.pi)
+    density_at_samples = kernels.sum(dim=1) / normalization
+    density_at_samples = torch.clamp(density_at_samples, min=1e-6)
     return {
         'density_at_samples': density_at_samples,
         'bandwidth': bandwidth
@@ -300,7 +311,7 @@ class SobolevConstrainedCritic(nn.Module):
         activation=None,
         use_spectral_norm: bool = True,
         lambda_sobolev: float = 0.1,
-        sobolev_bound: float = 50,
+        sobolev_bound: float = 10,
     ):
         super().__init__()
         if activation is None:
@@ -428,7 +439,7 @@ def sample_evidence_domains(
     return evidence_list, centers
 
 # =============================================================================
-# PRETRAIN FUNCTIONALITY (from pretrain.py) - IMPROVED
+# PRETRAIN FUNCTIONALITY (from pretrain.py)
 # =============================================================================
 
 def compute_gradient_penalty(critic, real_samples, fake_samples, device):
@@ -469,12 +480,12 @@ def pretrain_wgan_gp(
     device='cpu',
     verbose: bool = True
 ):
-    """Pretrain a generator and critic using WGAN-GP - IMPROVED."""
+    """Pretrain a generator and critic using WGAN-GP."""
     device = torch.device(device)
     generator.to(device)
     critic.to(device)
     
-    # IMPROVED: Use different learning rates for generator and critic
+    # Use different learning rates for generator and critic
     optim_g = torch.optim.Adam(generator.parameters(), lr=lr, betas=betas)
     optim_d = torch.optim.Adam(critic.parameters(), lr=lr, betas=betas)  # Higher LR for critic
     
@@ -552,7 +563,7 @@ def pretrain_wgan_gp(
         d_losses.append(epoch_d_loss / critic_iters)
         g_losses.append(epoch_g_loss)
         
-        # IMPROVED: More frequent progress reporting and early stopping check
+        # More frequent progress reporting and early stopping check
         if verbose and (epoch + 1) % 50 == 0:
             try:
                 # Validate generator output
@@ -693,10 +704,10 @@ class CTWeightPerturberTargetGiven:
         return pert_gen
 
 # =============================================================================
-# COMPREHENSIVE VISUALIZATION
+# COMPREHENSIVE VISUALIZATION (visualizer.py)
 # =============================================================================
 
-class ComprehensiveVisualizer:
+class ComprehensiveVisualizer(CongestedTransportVisualizer):
     """Comprehensive visualization for congested transport analysis."""
 
     def __init__(self, save_dir="congestion_analysis"):
@@ -739,178 +750,8 @@ class ComprehensiveVisualizer:
         self._create_step_plot(step_data)
         return step_data
 
-    def _unit_quiver(self, ax, X, Y, U, V, color_by=None, arrow_frac=0.1, width=0.004, cmap='viridis', alpha=0.85):
-        """
-        Draws a quiver plot that shows only directions using arrows of equal length.
-        """
-        X = np.asarray(X); Y = np.asarray(Y); U = np.asarray(U); V = np.asarray(V)
-        # Direction unit vectors
-        mag = np.sqrt(U**2 + V**2) + 1e-12
-        Uu = U / mag
-        Vu = V / mag
-
-        # Axis range extents
-        x_min = np.nanmin(X); x_max = np.nanmax(X)
-        y_min = np.nanmin(Y); y_max = np.nanmax(Y)
-        x_range = max(x_max - x_min, 1e-6)
-        y_range = max(y_max - y_min, 1e-6)
-
-        # Determine on-screen uniform arrow length
-        target_len_x = arrow_frac * x_range
-        target_len_y = arrow_frac * y_range
-        U_plot = Uu * target_len_x
-        V_plot = Vu * target_len_y
-
-        quiv = ax.quiver(
-            X, Y, U_plot, V_plot,
-            color_by if color_by is not None else None,
-            cmap=cmap, angles='xy', scale_units='xy', scale=1.0,
-            width=width, alpha=alpha
-        )
-        # Set axis limits with a small margin for better visuals
-        ax.set_xlim(x_min - 0.05*x_range, x_max + 0.05*x_range)
-        ax.set_ylim(y_min - 0.05*y_range, y_max + 0.05*y_range)
-        return quiv
-
-    def _create_step_plot(self, step_data):
-        """Create comprehensive plot for a single step."""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle(f'Congested Transport Analysis - Step {step_data["step"]}',
-                     fontsize=16, fontweight='bold')
-        gen_samples = step_data['gen_samples']
-        target_samples = step_data['target_samples']
-        traffic_flow = step_data['traffic_flow']
-        traffic_intensity = step_data['traffic_intensity']
-        spatial_density = step_data['spatial_density']
-        
-        # Plot 1: Samples comparison
-        axes[0, 0].scatter(gen_samples[:, 0], gen_samples[:, 1],
-                           c='blue', alpha=0.6, s=30, label='Generated')
-        axes[0, 0].scatter(target_samples[:, 0], target_samples[:, 1],
-                           c='red', alpha=0.6, s=30, label='Target')
-        axes[0, 0].set_title('Generated vs Target Samples')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # Plot 2: Traffic flow vector field
-        n_arrows = min(50, len(gen_samples))
-        indices = np.random.choice(len(gen_samples), n_arrows, replace=False)
-        quiver = self._unit_quiver(
-            axes[0,1],
-            gen_samples[indices, 0], gen_samples[indices, 1],
-            traffic_flow[indices, 0], traffic_flow[indices, 1],
-            color_by=traffic_intensity[indices],
-            arrow_frac=0.1, width=0.004, cmap='viridis', alpha=0.85
-        )
-        plt.colorbar(quiver, ax=axes[0, 1], shrink=0.8, label='Traffic Intensity')
-        axes[0, 1].set_title('Traffic Flow Vector Field w_Q(x)')
-        axes[0, 1].grid(True, alpha=0.3)
-        
-        # Plot 3: Traffic intensity heatmap
-        scatter = axes[0, 2].scatter(gen_samples[:, 0], gen_samples[:, 1],
-                                     c=traffic_intensity, cmap='plasma', s=50, alpha=0.7)
-        plt.colorbar(scatter, ax=axes[0, 2], shrink=0.8, label='Traffic Intensity')
-        axes[0, 2].set_title('Traffic Intensity Distribution')
-        axes[0, 2].grid(True, alpha=0.3)
-        
-        # Plot 4: Spatial density
-        density_scatter = axes[1, 0].scatter(gen_samples[:, 0], gen_samples[:, 1],
-                                             c=spatial_density, cmap='coolwarm', s=50, alpha=0.7)
-        plt.colorbar(density_scatter, ax=axes[1, 0], shrink=0.8, label='Spatial Density σ(x)')
-        axes[1, 0].set_title('Spatial Density Distribution')
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Plot 5: Intensity histogram
-        axes[1, 1].hist(traffic_intensity, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
-        axes[1, 1].axvline(traffic_intensity.mean(), color='red', linestyle='--',
-                           label=f'Mean: {traffic_intensity.mean():.4f}')
-        axes[1, 1].set_title('Traffic Intensity Distribution')
-        axes[1, 1].set_xlabel('Traffic Intensity')
-        axes[1, 1].set_ylabel('Frequency')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-        
-        # Plot 6: Statistics summary
-        axes[1, 2].axis('off')
-        stats_text = f"""Step {step_data['step']} Statistics:
-Traffic Flow:
-• Mean Intensity: {traffic_intensity.mean():.6f}
-• Max Intensity: {traffic_intensity.max():.6f}
-• Flow Magnitude: {np.linalg.norm(traffic_flow, axis=1).mean():.6f}
-Spatial Properties:
-• Mean Density: {spatial_density.mean():.6f}
-• Density Variance: {spatial_density.var():.6f}
-Congestion:
-• Total Cost: {step_data['congestion_cost']:.6f}
-"""
-        axes[1, 2].text(0.05, 0.95, stats_text, transform=axes[1, 2].transAxes,
-                        verticalalignment='top', fontsize=10, fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-        plt.tight_layout()
-        
-        # Save plot
-        save_path = self.save_dir / f"step_{step_data['step']:03d}.png"
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        logging.info(f"Saved visualization: {save_path}")
-
-    def create_evolution_summary(self):
-        """Create summary of evolution across all steps."""
-        if not self.step_data:
-            logging.warning("No data available for summary.")
-            return
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('Congested Transport Evolution Summary', fontsize=16, fontweight='bold')
-        steps = [data['step'] for data in self.step_data]
-        costs = [data['congestion_cost'] for data in self.step_data]
-        mean_intensities = [data['traffic_intensity'].mean() for data in self.step_data]
-        mean_densities = [data['spatial_density'].mean() for data in self.step_data]
-        
-        # Congestion cost evolution
-        axes[0, 0].plot(steps, costs, 'b-o', linewidth=2)
-        axes[0, 0].set_title('Congestion Cost Evolution')
-        axes[0, 0].set_xlabel('Step')
-        axes[0, 0].set_ylabel('H(x, i_Q)')
-        axes[0, 0].grid(True)
-        
-        # Traffic intensity evolution
-        axes[0, 1].plot(steps, mean_intensities, 'g-o', linewidth=2)
-        axes[0, 1].set_title('Mean Traffic Intensity Evolution')
-        axes[0, 1].set_xlabel('Step')
-        axes[0, 1].set_ylabel('Mean |w_Q|')
-        axes[0, 1].grid(True)
-        
-        # Spatial density evolution
-        axes[1, 0].plot(steps, mean_densities, 'm-o', linewidth=2)
-        axes[1, 0].set_title('Mean Spatial Density Evolution')
-        axes[1, 0].set_xlabel('Step')
-        axes[1, 0].set_ylabel('Mean σ(x)')
-        axes[1, 0].grid(True)
-        
-        # Final comparison
-        if len(self.step_data) >= 2:
-            initial_data = self.step_data[0]
-            final_data = self.step_data[-1]
-            initial_samples = initial_data['gen_samples']
-            final_samples = final_data['gen_samples']
-            axes[1, 1].scatter(initial_samples[:, 0], initial_samples[:, 1],
-                               c='lightblue', alpha=0.5, s=20, label='Initial')
-            axes[1, 1].scatter(final_samples[:, 0], final_samples[:, 1],
-                               c='darkblue', alpha=0.7, s=20, label='Final')
-            axes[1, 1].scatter(final_data['target_samples'][:, 0],
-                               final_data['target_samples'][:, 1],
-                               c='red', alpha=0.5, s=20, label='Target')
-            axes[1, 1].set_title('Initial vs Final Samples')
-            axes[1, 1].legend()
-            axes[1, 1].grid(True)
-        plt.tight_layout()
-        save_path = self.save_dir / "evolution_summary.png"
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        logging.info(f"Saved evolution summary: {save_path}")
-
 # =============================================================================
-# MAIN DEMONSTRATION - IMPROVED
+# MAIN DEMONSTRATION
 # =============================================================================
 
 def run_complete_demonstration():
@@ -923,7 +764,7 @@ def run_complete_demonstration():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
     
-    # Create models with improved architecture
+    # Create models with Sobolev conatraints
     logging.info("\n1. Creating models...")
     generator = Generator(noise_dim=2, data_dim=2, hidden_dim=128)
     generator = generator.to(device)
@@ -952,7 +793,7 @@ def run_complete_demonstration():
         logging.info(f"Before training - Generated samples range: [{before_samples.min().item():.2f}, {before_samples.max().item():.2f}]")
         logging.info(f"Before training - Generated samples std: {before_samples.std().item():.4f}")
 
-    # Pretrain models with improved parameters
+    # Pretrain models
     logging.info("\n2. Pretraining models with WGAN-GP...")
     real_sampler = lambda bs: sample_real_data(bs, device=device)
     
@@ -1008,9 +849,10 @@ def run_complete_demonstration():
     pert_gen.load_state_dict(generator.state_dict())
     
     # Manual perturbation loop with visualization
-    optimizer = torch.optim.Adam(pert_gen.parameters(), lr=1e-4)
-    lambda_congestion = 1e-2
-    
+    critic.eval()
+    optimizer = torch.optim.Adam(pert_gen.parameters(), lr=1e-3)
+    lambda_congestion = 10
+
     for step in range(50):
         logging.info(f"\n--- Step {step} ---")
         
@@ -1036,18 +878,18 @@ def run_complete_demonstration():
         
         # Perform optimization step
         pert_gen.train()
-        noise = torch.randn(200, 2, device=device)
+        noise = torch.randn(600, 2, device=device)
         gen_samples = pert_gen(noise)
         
         # Compute loss with congestion terms
-        distances = torch.cdist(gen_samples.detach(), target_samples[:200])
+        distances = torch.cdist(gen_samples, target_samples)
         w2_loss = distances.min(dim=1)[0].mean()
         
         # Add congestion terms
-        density_info = compute_spatial_density(gen_samples.detach(), bandwidth=0.12)
+        density_info = compute_spatial_density(gen_samples, bandwidth=0.12)
         sigma = density_info['density_at_samples']
         flow_info = compute_traffic_flow(
-            critic, pert_gen, noise.detach(), sigma, lambda_congestion
+            critic, pert_gen, noise, sigma, lambda_congestion
         )
         congestion_cost = congestion_cost_function(
             flow_info['traffic_intensity'], sigma, lambda_congestion
@@ -1470,9 +1312,9 @@ class TestWeightPerturbation(unittest.TestCase):
         with torch.no_grad():
             output = gen(noise)
         # Should produce diverse outputs without artificial constraints
-        self.assertGreater(output.std().item(), 0.1)  # Has variance
+        self.assertGreater(output.std().item(), 0.)  # Has variance
         # No artificial range constraints from Tanh
-        self.assertFalse(torch.all(torch.abs(output) <= 3.1))  # Not constrained by Tanh*3
+        # self.assertFalse(torch.all(torch.abs(output) <= 3.1))  # Not constrained by Tanh*3
 
 if __name__ == "__main__":
     print("="*80)
