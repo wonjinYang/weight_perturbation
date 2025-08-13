@@ -70,9 +70,9 @@ class CTWeightPerturber(ABC):
         
         # Initialize loss function with stable parameters
         self.loss_function = CongestionAwareLossFunction(
-            lambda_congestion=min(self.config.get('lambda_congestion', 1.0), 2.0),    # Reduced
-            lambda_sobolev=min(self.config.get('lambda_sobolev', 0.1), 2.0),       # Reduced
-            lambda_entropy=min(self.config.get('lambda_entropy', 0.012), 0.5)        # Reduced
+            lambda_congestion=self.config.get('lambda_congestion', 1.0),
+            lambda_sobolev=self.config.get('lambda_sobolev', 0.1),
+            lambda_entropy=self.config.get('lambda_entropy', 0.012),
         )
         
         # Initialize common parameters
@@ -328,10 +328,10 @@ class CTWeightPerturber(ABC):
         Returns:
             Tuple[float, int]: (new_eta, updated_no_improvement_count)
         """
-        eta_min = max(self.config.get('eta_min', 1e-6), 1e-7)      # Lower minimum
-        eta_max = min(self.config.get('eta_max', 0.5), 0.1)       # Lower maximum
-        eta_decay_factor = max(self.config.get('eta_decay_factor', 0.98), 0.95)   # Conservative
-        eta_boost_factor = min(self.config.get('eta_boost_factor', 1.01), 1.5)   # Very conservative
+        eta_min = self.config.get('eta_min', 1e-6) 
+        eta_max = self.config.get('eta_max', 0.5),
+        eta_decay_factor = self.config.get('eta_decay_factor', 0.9),
+        eta_boost_factor = self.config.get('eta_boost_factor', 1.05),
         improvement_threshold = self.config.get('improvement_threshold', 1e-5)
         
         # Adaptive threshold based on loss magnitude
@@ -410,7 +410,7 @@ class CTWeightPerturber(ABC):
         
         # Additional congestion check
         if self.enable_congestion_tracking and self.congestion_tracker:
-            congestion_threshold = max(self.config.get('congestion_threshold', 0.3), 0.1)  # Higher threshold
+            congestion_threshold = self.config.get('congestion_threshold', 0.5)
             if self.congestion_tracker.check_congestion_increase(congestion_threshold):
                 print("Rollback triggered due to excessive congestion increase")
                 return True
@@ -429,7 +429,7 @@ class CTWeightPerturber(ABC):
         Returns:
             bool: True if rollback should be triggered.
         """
-        rollback_patience = max(self.config.get('rollback_patience', 6), 8)  # Higher patience
+        rollback_patience = self.config.get('rollback_patience', 15)
         
         # Trigger rollback if no improvement for many consecutive steps
         if no_improvement_count >= rollback_patience * 2.5:  # Even more patient
@@ -577,8 +577,8 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             self.target_samples, 
             noise,
             critic=self.critic,
-            lambda_congestion=min(self.config.get('lambda_congestion', 1.0), 10.0),
-            lambda_sobolev=min(self.config.get('lambda_sobolev', 0.1), 0.5),
+            lambda_congestion=self.config.get('lambda_congestion', 1.0),
+            lambda_sobolev=self.config.get('lambda_sobolev', 0.1),
             track_congestion=True,
             use_direct_w2=True,
             w2_weight=1.0,  # Increased W2 weight for stability
@@ -800,7 +800,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         self.critics = critics if critics is not None else []
         
         # Override eval_batch_size for Section 3 with more conservative value
-        self.eval_batch_size = min(self.config.get('eval_batch_size', 400), 300)  # Cap at 300
+        self.eval_batch_size = self.config.get('eval_batch_size', 600)
         
         if len(self.evidence_list) == 0:
             raise ValueError("Evidence list must not be empty.")
@@ -808,7 +808,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         # Initialize multi-marginal congestion trackers if enabled
         if self.enable_congestion_tracking:
             self.multi_congestion_trackers = [
-                CongestionTracker(lambda_param=min(self.config.get('lambda_congestion', 0.05), 0.1))
+                CongestionTracker(lambda_param=self.config.get('lambda_congestion', 1.0))
                 for _ in self.evidence_list
             ]
     
@@ -901,13 +901,13 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 # Compute traffic flow for this domain with much reduced lambda
                 flow_info = compute_traffic_flow(
                     critic, pert_gen, noise_samples, sigma_gen,
-                    lambda_param=min(self.config.get('lambda_congestion', 1.0), 2.0)  # Much reduced
+                    lambda_param=self.config.get('lambda_congestion', 1.0)
                 )
                 
                  # Compute congestion cost without restrictive clamping  
                 raw_congestion_cost = congestion_cost_function(
                     flow_info['traffic_intensity'], sigma_gen,
-                    lambda_param=min(self.config.get('lambda_congestion', 1.0), 2.0)
+                    lambda_param=self.config.get('lambda_congestion', 1.0)
                 )
                 
                 # Apply mean reduction
@@ -1084,17 +1084,17 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             ot_orig = multi_marginal_ot_loss(
                 orig_out, self.evidence_list, virtual_samples,
                 blur=0.2,  # Larger blur for stability
-                lambda_virtual=min(self.config.get('lambda_virtual', 0.5), 2.0),
-                lambda_multi=min(self.config.get('lambda_multi', 0.7), 2.0),
-                lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.5)
+                lambda_virtual=self.config.get('lambda_virtual', 0.8),
+                lambda_multi=self.config.get('lambda_multi', 1.0),
+                lambda_entropy=self.config.get('lambda_entropy', 0.012),
             ).item()
 
             ot_pert = multi_marginal_ot_loss(
                 pert_out, self.evidence_list, virtual_samples,
                 blur=0.2,
-                lambda_virtual=min(self.config.get('lambda_virtual', 0.5), 2.0),
-                lambda_multi=min(self.config.get('lambda_multi', 0.7), 2.0),
-                lambda_entropy=min(self.config.get('lambda_entropy', 0.003), 0.5)
+                lambda_virtual=self.config.get('lambda_virtual', 0.8),
+                lambda_multi=self.config.get('lambda_multi', 1.0),
+                lambda_entropy=self.config.get('lambda_entropy', 0.012),
             ).item()
             
         except Exception as e:

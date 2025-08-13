@@ -540,7 +540,7 @@ def run_section2_example():
                     print(f"  Mean traffic intensity: {step_data['intensity'].mean():.6f}")
                     print(f"  Max traffic intensity: {step_data['intensity'].max():.6f}")
                     print(f"  Mean spatial density: {step_data['density'].mean():.6f}")
-                    print(f"  Congestion cost: {congestion_info.get('congestion_cost', 0):.6f}")
+                    print(f"  Congestion cost: {congestion_info.get('congestion_cost', .0):.6f}")
                     print(f"  Flow magnitude: {np.linalg.norm(step_data['flow'], axis=1).mean():.6f}")
                 
                 # Compute delta_theta with congestion awareness
