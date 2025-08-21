@@ -30,7 +30,7 @@ from weight_perturbation import (
     Generator,
     SobolevConstrainedCritic,
     CTWeightPerturberTargetNotGiven,
-    CongestedTransportVisualizer,
+    MultiMarginalCongestedTransportVisualizer,
 )
 
 # Set up plotting style
@@ -44,13 +44,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Section 3: Evidence-Based Perturbation with Multi-Marginal Flow Visualization")
     parser.add_argument("--seed", type=int, default=2025, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="Device to use")
-    parser.add_argument("--pretrain_epochs", type=int, default=150, help="Pretraining epochs")
+    parser.add_argument("--pretrain_epochs", type=int, default=300, help="Pretraining epochs")
     parser.add_argument("--perturb_epochs", type=int, default=50, help="Perturbation epochs")
     parser.add_argument("--batch_size", type=int, default=96, help="Training batch size")
     parser.add_argument("--eval_batch_size", type=int, default=600, help="Evaluation batch size")  # Reduced
     parser.add_argument("--num_evidence_domains", type=int, default=3, help="Number of evidence domains")
-    parser.add_argument("--samples_per_domain", type=int, default=40, help="Samples per evidence domain")
-    parser.add_argument("--eta_init", type=float, default=0.02, help="Initial learning rate")  # Reduced
+    parser.add_argument("--samples_per_domain", type=int, default=20, help="Samples per evidence domain")
+    parser.add_argument("--eta_init", type=float, default=0.045, help="Initial learning rate")  # Reduced
     parser.add_argument("--enable_congestion", action="store_true", default=True, help="Enable congestion tracking")
     parser.add_argument("--use_sobolev_critic", action="store_true", default=True, help="Use Sobolev-constrained critics")
     parser.add_argument("--visualize_every", type=int, default=5, help="Visualize traffic flow every N epochs")
@@ -93,8 +93,8 @@ def run_section3_example():
             critic = SobolevConstrainedCritic(
                 data_dim=2, hidden_dim=256,
                 use_spectral_norm=True,
-                lambda_sobolev=0.005,  # Reduced for stability
-                sobolev_bound=1.5      # Reduced bound
+                lambda_sobolev=1.0,  # Reduced for stability
+                sobolev_bound=50      # Reduced bound
             ).to(device)
         else:
             from weight_perturbation import Critic
@@ -105,7 +105,7 @@ def run_section3_example():
     # Pretrain generator with first critic
     print(f"\nPretraining generator for {args.pretrain_epochs} epochs...")
     real_sampler = lambda bs: sample_real_data(
-        bs, means=[torch.tensor([0.0, 0.0], device=device)], std=0.5, device=device
+        bs, means=[torch.tensor([0.0, 0.0], device=device)], std=0.7, device=device
     )
 
     pretrained_gen, _ = pretrain_wgan_gp(
@@ -133,7 +133,7 @@ def run_section3_example():
         print(f" Domain {i+1}: {center}")
 
     # Initialize multi-marginal traffic flow visualizer
-    visualizer = CongestedTransportVisualizer(
+    visualizer = MultiMarginalCongestedTransportVisualizer(
         num_domains=args.num_evidence_domains,
         figsize=(22, 16),
         save_dir=f"test_results/plots/congestion_analysis/"
@@ -152,17 +152,17 @@ def run_section3_example():
         'eta_init': args.eta_init,           # Significantly reduced learning rate
         'eta_min': 1e-6,             # Lower minimum
         'eta_max': 0.5,             # Lower maximum
-        'eta_decay_factor': 0.95,    # Less aggressive decay
+        'eta_decay_factor': 0.90,    # Less aggressive decay
         'eta_boost_factor': 1.05,    # Very conservative boost
-        'clip_norm': 0.2,            # Strong clipping
+        'clip_norm': 0.4,            # Strong clipping
         'momentum': 0.85,            # Reduced momentum
         'patience': 15,              # Increased patience
         'rollback_patience': 10,      # Increased rollback patience
-        'lambda_entropy': 0.01,     # Reduced entropy
+        'lambda_entropy': 0.4,     # Reduced entropy
         'lambda_virtual': 0.8,       # Reduced virtual weight
         'lambda_multi': 1.0,         # Reduced multi weight
         'lambda_congestion': 1.0,   # Reduced congestion parameter
-        'lambda_sobolev': 0.01,     # Reduced Sobolev parameter
+        'lambda_sobolev': 0.1,     # Reduced Sobolev parameter
         'eval_batch_size': args.eval_batch_size
     })
 

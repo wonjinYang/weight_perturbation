@@ -2,9 +2,10 @@
 Additional loss functions integrating congestion theory and Sobolev regularization.
 
 This module extends the basic losses.py with the theoretical components:
-- Global W2 loss with congestion tracking
-- Multi-marginal OT with congestion awareness
+- Global W2 loss with congestion tracking and mass conservation
+- Multi-marginal OT with enhanced theoretical integration
 - Integration with spatial density and traffic flow
+- Theoretical validation and consistency checks
 """
 
 import torch
@@ -16,6 +17,9 @@ from .congestion import (
     compute_spatial_density, 
     compute_traffic_flow, 
     congestion_cost_function,
+    get_congestion_second_derivative,
+    enforce_mass_conservation,
+    validate_theoretical_consistency,
     CongestionTracker
 )
 from .sobolev import sobolev_regularization, SobolevWGANLoss
@@ -32,26 +36,34 @@ def global_w2_loss_and_grad_with_congestion(
     map_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = barycentric_ot_map,
     use_direct_w2: bool = True,
     w2_weight: float = 1.0,
-    map_weight: float = 0.5
+    map_weight: float = 0.5,
+    enforce_mass_conservation_flag: bool = True,
+    theoretical_validation: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
     """
-    Enhanced version of global_w2_loss_and_grad with congestion tracking.
+    Enhanced version of global_w2_loss_and_grad with full theoretical integration.
     
-    This function extends the original by incorporating spatial density estimation,
-    traffic flow computation, and Sobolev regularization as per the theoretical framework.
+    This function extends the original by incorporating:
+    - Spatial density estimation and traffic flow computation
+    - Mass conservation enforcement 
+    - Theoretical validation
+    - Congestion-aware loss scaling
+    - Reduced over-conservative clamping
     
     Args:
         generator (torch.nn.Module): Pre-trained generator model.
         target_samples (torch.Tensor): Target distribution samples.
         noise_samples (torch.Tensor): Input noise for generator.
         critic (Optional[torch.nn.Module]): Critic for traffic flow computation.
-        lambda_congestion (float): Congestion parameter. Defaults to 0.1.
-        lambda_sobolev (float): Sobolev regularization strength. Defaults to 0.01.
+        lambda_congestion (float): Congestion parameter. Defaults to 1.0.
+        lambda_sobolev (float): Sobolev regularization strength. Defaults to 0.1.
         track_congestion (bool): Whether to compute and return congestion metrics.
         map_fn (Callable): Function to compute OT map.
         use_direct_w2 (bool): Whether to include direct W2 loss.
         w2_weight (float): Weight for direct W2 loss.
         map_weight (float): Weight for mapping loss.
+        enforce_mass_conservation_flag (bool): Whether to enforce mass conservation.
+        theoretical_validation (bool): Whether to perform theoretical validation.
     
     Returns:
         Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]: 
@@ -85,7 +97,7 @@ def global_w2_loss_and_grad_with_congestion(
         map_loss = ((gen_out - matched) ** 2).sum(dim=1).mean()
         total_loss += map_weight * map_loss
     
-    # Add congestion-aware components if critic is provided
+    # Add enhanced congestion-aware components if critic is provided
     if critic is not None and track_congestion:
         try:
             # Compute spatial density
@@ -97,48 +109,116 @@ def global_w2_loss_and_grad_with_congestion(
                 critic, generator, noise_samples, sigma, lambda_congestion
             )
 
-            # Compute congestion cost
+            # Compute congestion cost without restrictive clamping
             congestion_cost = congestion_cost_function(
                 flow_info['traffic_intensity'], sigma, lambda_congestion
             ).mean()
-            total_loss *= congestion_cost
+            
+            # Apply congestion scaling to loss (theoretical justification)
+            # This implements the congested transport cost structure
+            if congestion_cost > 1e-6:  # Only apply if meaningful congestion
+                # Get H''(x,i) for theoretical scaling
+                h_second = get_congestion_second_derivative(
+                    flow_info['traffic_intensity'], sigma, lambda_congestion
+                )
+                
+                # Theoretical congestion scaling factor
+                congestion_scale = 1.0 + 0.1 * (h_second * flow_info['traffic_intensity']).mean()
+                congestion_scale = max(0.5, min(congestion_scale, 3.0))  # Reasonable bounds
+                
+                total_loss = total_loss * congestion_scale
+                congestion_info['congestion_scale'] = congestion_scale
+            else:
+                congestion_info['congestion_scale'] = 1.0
 
-
-            # Add Sobolev regularization
-            sobolev_loss = sobolev_regularization(critic, gen_out, sigma, lambda_sobolev)
+            # Add Sobolev regularization with adaptive strength
+            if flow_info['traffic_intensity'].mean() > 0.1:  # Higher intensity requires more regularization
+                adaptive_lambda_sobolev = lambda_sobolev * (1.0 + 0.2 * flow_info['traffic_intensity'].mean())
+            else:
+                adaptive_lambda_sobolev = lambda_sobolev
+                
+            sobolev_loss = sobolev_regularization(critic, gen_out, sigma, adaptive_lambda_sobolev)
             total_loss += sobolev_loss
 
-            # Store congestion information
-            congestion_info = {
+            # Mass conservation enforcement
+            if enforce_mass_conservation_flag:
+                try:
+                    target_density_info = compute_spatial_density(target_samples, bandwidth=0.15)
+                    target_density = target_density_info['density_at_samples']
+                    
+                    # Resample target density to match generator output size
+                    if target_density.shape[0] != gen_out.shape[0]:
+                        indices = torch.randperm(target_density.shape[0])[:gen_out.shape[0]]
+                        target_density = target_density[indices]
+                    
+                    mass_conservation = enforce_mass_conservation(
+                        flow_info['traffic_flow'],
+                        target_density,
+                        sigma,
+                        gen_out,
+                        lagrange_multiplier=0.1
+                    )
+                    
+                    # Add mass conservation penalty
+                    mass_penalty = 0.1 * mass_conservation['mass_conservation_error']
+                    total_loss += mass_penalty
+                    
+                    congestion_info['mass_conservation_error'] = mass_conservation['mass_conservation_error']
+                    congestion_info['mass_penalty'] = mass_penalty
+                    
+                except Exception as e:
+                    print(f"Warning: Mass conservation enforcement failed: {e}")
+                    congestion_info['mass_conservation_error'] = torch.tensor(0.0, device=gen_out.device)
+                    congestion_info['mass_penalty'] = torch.tensor(0.0, device=gen_out.device)
+
+            # Store enhanced congestion information
+            congestion_info.update({
                 'spatial_density': sigma,
                 'traffic_flow': flow_info['traffic_flow'],
                 'traffic_intensity': flow_info['traffic_intensity'],
                 'congestion_cost': congestion_cost,
                 'sobolev_loss': sobolev_loss,
-                'gradient_norm': flow_info['gradient_norm']
-            }
+                'gradient_norm': flow_info['gradient_norm'],
+                'adaptive_lambda_sobolev': adaptive_lambda_sobolev
+            })
+            
+            # Theoretical validation
+            if theoretical_validation:
+                validation_results = validate_theoretical_consistency(
+                    flow_info, density_info, gen_out, target_samples
+                )
+                congestion_info['theoretical_consistency'] = validation_results.get('overall_consistency', 0.0)
+                congestion_info['validation_results'] = validation_results
+            
         except Exception as e:
-            print(f"Warning: Congestion computation failed: {e}")
+            print(f"Warning: Enhanced congestion computation failed: {e}")
             congestion_info = {
                 'spatial_density': torch.zeros(gen_out.shape[0], device=gen_out.device),
                 'traffic_flow': torch.zeros_like(gen_out),
                 'traffic_intensity': torch.zeros(gen_out.shape[0], device=gen_out.device),
                 'congestion_cost': torch.tensor(0.0, device=gen_out.device),
                 'sobolev_loss': torch.tensor(0.0, device=gen_out.device),
-                'gradient_norm': torch.zeros(gen_out.shape[0], device=gen_out.device)
+                'gradient_norm': torch.zeros(gen_out.shape[0], device=gen_out.device),
+                'congestion_scale': 1.0,
+                'mass_conservation_error': torch.tensor(0.0, device=gen_out.device),
+                'theoretical_consistency': 0.0
             }
     
-    # Add diversity regularization
+    # Add diversity regularization with theoretical motivation
     if gen_out.shape[0] > 1:
         try:
             gen_cov = torch.cov(gen_out.t())
             diversity_loss = -torch.logdet(gen_cov + 1e-6 * torch.eye(gen_out.shape[1], device=gen_out.device))
             total_loss += 0.01 * diversity_loss
+            if congestion_info is not None:
+                congestion_info['diversity_loss'] = diversity_loss
         except:
             # Fallback diversity term
             gen_std = gen_out.std(dim=0).mean()
             diversity_loss = -torch.log(gen_std + 1e-6)
             total_loss += 0.01 * diversity_loss
+            if congestion_info is not None:
+                congestion_info['diversity_loss'] = diversity_loss
     
     # Compute gradients
     generator.zero_grad()
@@ -171,10 +251,19 @@ def multi_marginal_ot_loss_with_congestion(
     lambda_entropy: float = 0.012,
     lambda_congestion: float = 1.0,
     lambda_sobolev: float = 0.1,
-    track_congestion: bool = True
+    track_congestion: bool = True,
+    enforce_mass_conservation_flag: bool = True,
+    theoretical_validation: bool = True
 ) -> Tuple[torch.Tensor, Optional[Dict[str, List[Dict]]]]:
     """
-    Enhanced multi-marginal OT loss with congestion tracking for each evidence domain.
+    Enhanced multi-marginal OT loss with full theoretical integration.
+    
+    This version includes:
+    - Enhanced congestion tracking for each evidence domain
+    - Multi-domain mass conservation
+    - Theoretical validation across domains
+    - Adaptive regularization based on domain characteristics
+    - Reduced over-conservative constraints
     
     Args:
         generator_outputs (torch.Tensor): Generated samples.
@@ -189,11 +278,13 @@ def multi_marginal_ot_loss_with_congestion(
         lambda_congestion (float): Congestion parameter.
         lambda_sobolev (float): Sobolev regularization strength.
         track_congestion (bool): Whether to track congestion metrics.
+        enforce_mass_conservation_flag (bool): Whether to enforce mass conservation.
+        theoretical_validation (bool): Whether to perform theoretical validation.
     
     Returns:
         Tuple[torch.Tensor, Optional[Dict]]: 
             - loss: Total multi-marginal loss
-            - congestion_info: Multi-domain congestion information (if track_congestion=True)
+            - multi_congestion_info: Multi-domain congestion information (if track_congestion=True)
     """
     num_domains = len(evidence_list)
     if num_domains == 0:
@@ -209,9 +300,13 @@ def multi_marginal_ot_loss_with_congestion(
     # Virtual target loss
     loss_virtual = sinkhorn(generator_outputs, virtual_targets)
 
-    # Multi-marginal evidence loss with congestion tracking
+    # Multi-marginal evidence loss with enhanced congestion tracking
     loss_multi = 0.0
     multi_congestion_info = {'domains': []} if track_congestion else None
+    
+    # For multi-domain mass conservation
+    all_target_densities = []
+    all_current_densities = []
     
     for i, evidence in enumerate(evidence_list):
         if generator_outputs.shape[1] != evidence.shape[1]:
@@ -219,7 +314,7 @@ def multi_marginal_ot_loss_with_congestion(
         
         # Standard pairwise OT loss
         pairwise_loss = sinkhorn(generator_outputs, evidence)
-        loss_multi += weights[i] * pairwise_loss
+        domain_weight = weights[i]
         
         # Add congestion tracking for this domain
         if track_congestion and critics is not None and i < len(critics):
@@ -241,15 +336,38 @@ def multi_marginal_ot_loss_with_congestion(
                     sigma_gen, lambda_congestion
                 )
                 
-                # Compute congestion cost
+                # Compute congestion cost without artificial limits
                 congestion_cost = congestion_cost_function(
                     flow_info['traffic_intensity'], sigma_gen, lambda_congestion
                 ).mean()
-                loss_multi *= congestion_cost
+                
+                # Enhanced congestion scaling for this domain
+                if congestion_cost > 1e-6:
+                    h_second = get_congestion_second_derivative(
+                        flow_info['traffic_intensity'], sigma_gen, lambda_congestion
+                    )
+                    domain_congestion_scale = 1.0 + 0.15 * (h_second * flow_info['traffic_intensity']).mean()
+                    domain_congestion_scale = max(0.3, min(domain_congestion_scale, 4.0))
+                    pairwise_loss = pairwise_loss * domain_congestion_scale
+                else:
+                    domain_congestion_scale = 1.0
 
-                # Add Sobolev regularization for this domain
-                sobolev_loss = sobolev_regularization(critic, generator_outputs, sigma_gen, lambda_sobolev)
-                loss_multi += sobolev_loss
+                # Add adaptive Sobolev regularization for this domain
+                domain_intensity_mean = flow_info['traffic_intensity'].mean()
+                if domain_intensity_mean > 0.05:
+                    adaptive_lambda = lambda_sobolev * (1.0 + 0.3 * domain_intensity_mean)
+                else:
+                    adaptive_lambda = lambda_sobolev
+                    
+                sobolev_loss = sobolev_regularization(critic, generator_outputs, sigma_gen, adaptive_lambda)
+                pairwise_loss += sobolev_loss
+                
+                # Collect densities for multi-domain mass conservation
+                if enforce_mass_conservation_flag:
+                    evidence_density_info = compute_spatial_density(evidence, bandwidth=0.15)
+                    evidence_density = evidence_density_info['density_at_samples']
+                    all_target_densities.append(evidence_density)
+                    all_current_densities.append(sigma_gen)
                 
                 domain_info = {
                     'domain_id': i,
@@ -258,14 +376,25 @@ def multi_marginal_ot_loss_with_congestion(
                     'traffic_intensity': flow_info['traffic_intensity'],
                     'congestion_cost': congestion_cost,
                     'sobolev_loss': sobolev_loss,
-                    'gradient_norm': flow_info['gradient_norm']
+                    'gradient_norm': flow_info['gradient_norm'],
+                    'congestion_scale': domain_congestion_scale,
+                    'adaptive_lambda_sobolev': adaptive_lambda,
+                    'domain_weight': domain_weight
                 }
+                
+                # Theoretical validation for this domain
+                if theoretical_validation:
+                    validation_results = validate_theoretical_consistency(
+                        flow_info, density_info, generator_outputs, evidence
+                    )
+                    domain_info['theoretical_consistency'] = validation_results.get('overall_consistency', 0.0)
+                    domain_info['validation_results'] = validation_results
                 
                 multi_congestion_info['domains'].append(domain_info)
                 
             except Exception as e:
-                print(f"Warning: Congestion computation failed for domain {i}: {e}")
-                # Create dummy domain info
+                print(f"Warning: Enhanced congestion computation failed for domain {i}: {e}")
+                # Create enhanced dummy domain info
                 domain_info = {
                     'domain_id': i,
                     'spatial_density': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device),
@@ -273,12 +402,52 @@ def multi_marginal_ot_loss_with_congestion(
                     'traffic_intensity': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device),
                     'congestion_cost': torch.tensor(0.0, device=generator_outputs.device),
                     'sobolev_loss': torch.tensor(0.0, device=generator_outputs.device),
-                    'gradient_norm': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device)
+                    'gradient_norm': torch.zeros(generator_outputs.shape[0], device=generator_outputs.device),
+                    'congestion_scale': 1.0,
+                    'theoretical_consistency': 0.0,
+                    'domain_weight': domain_weight
                 }
                 if multi_congestion_info:
                     multi_congestion_info['domains'].append(domain_info)
+        
+        loss_multi += domain_weight * pairwise_loss
     
-    # Entropy regularization (e.g., via covariance determinant for diversity)
+    # Multi-domain mass conservation enforcement
+    if enforce_mass_conservation_flag and all_target_densities and all_current_densities:
+        try:
+            # Compute average target and current densities across domains
+            avg_target_density = torch.stack(all_target_densities).mean(dim=0)
+            avg_current_density = torch.stack(all_current_densities).mean(dim=0)
+            
+            # Resample to match generator output size
+            if avg_target_density.shape[0] != generator_outputs.shape[0]:
+                indices = torch.randperm(avg_target_density.shape[0])[:generator_outputs.shape[0]]
+                avg_target_density = avg_target_density[indices]
+            
+            # Enforce multi-domain mass conservation
+            multi_domain_conservation = enforce_mass_conservation(
+                torch.zeros_like(generator_outputs),  # Dummy flow
+                avg_target_density,
+                avg_current_density,
+                generator_outputs,
+                lagrange_multiplier=0.05
+            )
+            
+            # Add multi-domain mass conservation penalty
+            mass_penalty = 0.05 * multi_domain_conservation['mass_conservation_error']
+            loss_multi += mass_penalty
+            
+            if multi_congestion_info:
+                multi_congestion_info['multi_domain_mass_error'] = multi_domain_conservation['mass_conservation_error'].item()
+                multi_congestion_info['multi_domain_mass_penalty'] = mass_penalty.item()
+                
+        except Exception as e:
+            print(f"Warning: Multi-domain mass conservation failed: {e}")
+            if multi_congestion_info:
+                multi_congestion_info['multi_domain_mass_error'] = 0.0
+                multi_congestion_info['multi_domain_mass_penalty'] = 0.0
+    
+    # Enhanced entropy regularization with theoretical justification
     data_dim = generator_outputs.shape[1]
     try:
         cov = torch.cov(generator_outputs.t()) + torch.eye(data_dim, device=generator_outputs.device) * 1e-5
@@ -286,17 +455,49 @@ def multi_marginal_ot_loss_with_congestion(
         eigenvals = torch.clamp(eigenvals, min=1e-8)
         log_det = torch.sum(torch.log(eigenvals))
         entropy_reg = -lambda_entropy * log_det
+        
+        # Adaptive entropy regularization based on domain diversity
+        if multi_congestion_info and multi_congestion_info['domains']:
+            domain_consistency_scores = [
+                d.get('theoretical_consistency', 0.0) for d in multi_congestion_info['domains']
+            ]
+            avg_consistency = sum(domain_consistency_scores) / len(domain_consistency_scores)
+            # Less consistent domains need more entropy regularization
+            entropy_scale = 1.0 + 0.5 * (1.0 - avg_consistency)
+            entropy_reg = entropy_reg * entropy_scale
+            
+            if multi_congestion_info:
+                multi_congestion_info['entropy_scale'] = entropy_scale
+                multi_congestion_info['avg_domain_consistency'] = avg_consistency
+        
     except:
         # Fallback entropy regularization
         entropy_reg = -lambda_entropy * torch.log(generator_outputs.std(dim=0).mean() + 1e-8)
+        if multi_congestion_info:
+            multi_congestion_info['entropy_scale'] = 1.0
 
     total_loss = lambda_virtual * loss_virtual + lambda_multi * loss_multi + entropy_reg
+    
+    # Store additional global information
+    if multi_congestion_info:
+        multi_congestion_info['loss_virtual'] = loss_virtual.item()
+        multi_congestion_info['loss_multi'] = loss_multi.item()
+        multi_congestion_info['entropy_reg'] = entropy_reg.item()
+        multi_congestion_info['total_loss'] = total_loss.item()
+    
     return total_loss, multi_congestion_info
 
 
 class CongestionAwareLossFunction:
     """
-    Comprehensive loss function that integrates all congestion transport components.
+    Enhanced comprehensive loss function with full theoretical integration.
+    
+    This version includes:
+    - Mass conservation enforcement
+    - Theoretical validation
+    - Adaptive congestion scaling
+    - Multi-domain coordination
+    - Reduced over-conservative constraints
     """
     
     def __init__(
@@ -305,22 +506,29 @@ class CongestionAwareLossFunction:
         lambda_sobolev: float = 0.1,
         lambda_entropy: float = 0.012,
         congestion_cost_type: str = 'quadratic_linear',
-        use_adaptive_weights: bool = True
+        use_adaptive_weights: bool = True,
+        enable_mass_conservation: bool = True,
+        enable_theoretical_validation: bool = True
     ):
         self.lambda_congestion = lambda_congestion
         self.lambda_sobolev = lambda_sobolev
         self.lambda_entropy = lambda_entropy
         self.congestion_cost_type = congestion_cost_type
         self.use_adaptive_weights = use_adaptive_weights
+        self.enable_mass_conservation = enable_mass_conservation
+        self.enable_theoretical_validation = enable_theoretical_validation
         
         # Initialize congestion tracker
         self.congestion_tracker = CongestionTracker(lambda_congestion)
         
-        # Initialize Sobolev loss
+        # Initialize Sobolev loss with enhanced features
         self.sobolev_loss = SobolevWGANLoss(
             lambda_sobolev=lambda_sobolev,
             use_adaptive_sobolev=use_adaptive_weights
         )
+        
+        # Track theoretical consistency over time
+        self.consistency_history = []
     
     def compute_target_given_loss(
         self,
@@ -330,7 +538,7 @@ class CongestionAwareLossFunction:
         critic: Optional[torch.nn.Module] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
         """
-        Compute enhanced loss for target-given perturbation.
+        Compute enhanced loss for target-given perturbation with full theoretical integration.
         
         Returns:
             Tuple[loss, gradients, congestion_info]
@@ -339,7 +547,9 @@ class CongestionAwareLossFunction:
             generator, target_samples, noise_samples, critic,
             lambda_congestion=self.lambda_congestion,
             lambda_sobolev=self.lambda_sobolev,
-            track_congestion=True
+            track_congestion=True,
+            enforce_mass_conservation_flag=self.enable_mass_conservation,
+            theoretical_validation=self.enable_theoretical_validation
         )
     
     def compute_evidence_based_loss(
@@ -351,7 +561,7 @@ class CongestionAwareLossFunction:
         weights: Optional[List[float]] = None
     ) -> Tuple[torch.Tensor, Dict]:
         """
-        Compute enhanced loss for evidence-based perturbation.
+        Compute enhanced loss for evidence-based perturbation with theoretical integration.
         
         Returns:
             Tuple[loss, multi_congestion_info]
@@ -362,48 +572,100 @@ class CongestionAwareLossFunction:
             lambda_congestion=self.lambda_congestion,
             lambda_sobolev=self.lambda_sobolev,
             lambda_entropy=self.lambda_entropy,
-            track_congestion=True
+            track_congestion=True,
+            enforce_mass_conservation_flag=self.enable_mass_conservation,
+            theoretical_validation=self.enable_theoretical_validation
         )
     
     def update_congestion_history(self, congestion_info: Dict) -> None:
-        """Update congestion tracking history."""
+        """Update congestion tracking history with enhanced information."""
         self.congestion_tracker.update(congestion_info)
+        
+        # Track theoretical consistency
+        if 'theoretical_consistency' in congestion_info:
+            self.consistency_history.append(congestion_info['theoretical_consistency'])
+            # Keep last 100 entries
+            if len(self.consistency_history) > 100:
+                self.consistency_history = self.consistency_history[-100:]
     
     def check_congestion_constraints(self, threshold: float = 0.15) -> bool:
-        """Check if congestion constraints are satisfied."""
-        return not self.congestion_tracker.check_congestion_increase(threshold)
+        """Enhanced congestion constraint checking with theoretical validation."""
+        # Check basic congestion increase
+        congestion_ok = not self.congestion_tracker.check_congestion_increase(threshold)
+        
+        # Check theoretical consistency
+        theoretical_ok = self.congestion_tracker.check_theoretical_consistency()
+        
+        return congestion_ok and theoretical_ok
     
     def get_congestion_statistics(self) -> Dict[str, float]:
-        """Get summary statistics of congestion tracking."""
-        return {
+        """Get comprehensive statistics including theoretical metrics."""
+        stats = {
             'average_congestion': self.congestion_tracker.get_average_congestion(),
             'recent_congestion': self.congestion_tracker.history['congestion_cost'][-1] if self.congestion_tracker.history['congestion_cost'] else 0.0,
             'congestion_trend': self.congestion_tracker.get_average_congestion(window=3) - self.congestion_tracker.get_average_congestion(window=10) if len(self.congestion_tracker.history['congestion_cost']) >= 10 else 0.0
         }
+        
+        # Add theoretical consistency statistics
+        if self.consistency_history:
+            stats['avg_theoretical_consistency'] = sum(self.consistency_history) / len(self.consistency_history)
+            stats['recent_theoretical_consistency'] = self.consistency_history[-1]
+            if len(self.consistency_history) >= 5:
+                recent_avg = sum(self.consistency_history[-3:]) / 3
+                prev_avg = sum(self.consistency_history[-6:-3]) / 3 if len(self.consistency_history) >= 6 else recent_avg
+                stats['consistency_trend'] = recent_avg - prev_avg
+        
+        # Add mass conservation statistics
+        if self.congestion_tracker.history['mass_conservation_error']:
+            stats['avg_mass_conservation_error'] = sum(self.congestion_tracker.history['mass_conservation_error']) / len(self.congestion_tracker.history['mass_conservation_error'])
+            stats['recent_mass_conservation_error'] = self.congestion_tracker.history['mass_conservation_error'][-1]
+        
+        return stats
+    
+    def adapt_parameters(self, statistics: Dict[str, float]) -> None:
+        """Adapt loss function parameters based on performance statistics."""
+        if not self.use_adaptive_weights:
+            return
+        
+        # Adapt lambda_sobolev based on theoretical consistency
+        consistency = statistics.get('recent_theoretical_consistency', 0.5)
+        if consistency < 0.3:  # Low consistency needs more regularization
+            self.lambda_sobolev = min(self.lambda_sobolev * 1.1, 0.5)
+        elif consistency > 0.8:  # High consistency can reduce regularization
+            self.lambda_sobolev = max(self.lambda_sobolev * 0.95, 0.01)
+        
+        # Adapt lambda_congestion based on congestion trends
+        congestion_trend = statistics.get('congestion_trend', 0.0)
+        if congestion_trend > 0.1:  # Increasing congestion
+            self.lambda_congestion = min(self.lambda_congestion * 1.05, 2.0)
+        elif congestion_trend < -0.05:  # Decreasing congestion
+            self.lambda_congestion = max(self.lambda_congestion * 0.98, 0.1)
 
 
 def compute_convergence_metrics(
     generator: torch.nn.Module,
     target_or_evidence: torch.Tensor,
     noise_samples: torch.Tensor,
-    history_window: int = 10
+    history_window: int = 10,
+    include_theoretical_metrics: bool = True
 ) -> Dict[str, float]:
     """
-    Compute convergence metrics for perturbation monitoring.
+    Enhanced convergence metrics with theoretical validation.
     
     Args:
         generator (torch.nn.Module): Current generator.
         target_or_evidence (torch.Tensor): Target or evidence samples.
         noise_samples (torch.Tensor): Noise input.
         history_window (int): Window size for trend analysis.
+        include_theoretical_metrics (bool): Whether to include theoretical metrics.
     
     Returns:
-        Dict[str, float]: Convergence metrics.
+        Dict[str, float]: Enhanced convergence metrics.
     """
     with torch.no_grad():
         gen_samples = generator(noise_samples)
     
-    # Compute Wasserstein distances
+    # Compute standard Wasserstein distances
     sinkhorn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
     w2_distance = sinkhorn(gen_samples, target_or_evidence).item()
     
@@ -416,9 +678,54 @@ def compute_convergence_metrics(
     target_std = target_or_evidence.std(dim=0)
     std_ratio = (gen_std / (target_std + 1e-8)).mean().item()
     
-    return {
+    metrics = {
         'w2_distance': w2_distance,
         'mean_shift': mean_shift,
         'std_ratio': std_ratio,
         'convergence_score': 1.0 / (1.0 + w2_distance + mean_shift + abs(std_ratio - 1.0))
     }
+    
+    # Add theoretical metrics if requested
+    if include_theoretical_metrics:
+        try:
+            # Compute spatial density metrics
+            gen_density_info = compute_spatial_density(gen_samples)
+            target_density_info = compute_spatial_density(target_or_evidence)
+            
+            gen_density = gen_density_info['density_at_samples']
+            target_density = target_density_info['density_at_samples']
+            
+            # Resample to same size for comparison
+            min_size = min(gen_density.shape[0], target_density.shape[0])
+            gen_density = gen_density[:min_size]
+            target_density = target_density[:min_size]
+            
+            # Density distribution similarity
+            density_kl_div = F.kl_div(
+                torch.log(gen_density + 1e-8), 
+                target_density + 1e-8, 
+                reduction='mean'
+            ).item()
+            
+            metrics['density_kl_divergence'] = density_kl_div
+            metrics['density_similarity'] = 1.0 / (1.0 + density_kl_div)
+            
+            # Coverage metrics
+            distances = torch.cdist(gen_samples, target_or_evidence)
+            min_distances = distances.min(dim=1)[0]
+            coverage_score = torch.exp(-min_distances.mean()).item()
+            
+            metrics['coverage_score'] = coverage_score
+            
+            # Enhanced convergence score with theoretical components
+            metrics['enhanced_convergence_score'] = (
+                0.4 * metrics['convergence_score'] +
+                0.3 * metrics['density_similarity'] +
+                0.3 * coverage_score
+            )
+            
+        except Exception as e:
+            print(f"Warning: Theoretical metrics computation failed: {e}")
+            metrics['enhanced_convergence_score'] = metrics['convergence_score']
+    
+    return metrics
