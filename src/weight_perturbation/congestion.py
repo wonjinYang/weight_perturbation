@@ -54,7 +54,7 @@ class CongestionTracker:
             if len(self.history[key]) > self.history_size:
                 self.history[key] = self.history[key][-self.history_size:]
     
-    def check_congestion_increase(self, threshold: float = 0.1) -> bool:
+    def check_congestion_increase(self, threshold: float = 0.5) -> bool:
         """Check if congestion has increased beyond threshold."""
         if len(self.history['congestion_cost']) < 2:
             return False

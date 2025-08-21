@@ -218,11 +218,11 @@ class CTWeightPerturber(ABC):
         param_count = len(grads)
         
         # More conservative parameter scaling
-        param_scale = max(1.0, min(param_count / 50000.0, 1.5))  # Less aggressive, cap at 1.5x
-        max_norm = clip_norm * param_scale
+        # param_scale = max(1.0, min(param_count / 50000.0, 1.5))  # Less aggressive, cap at 1.5x
+        # max_norm = clip_norm * param_scale
         
-        if norm > max_norm:
-            delta_theta = delta_theta * (max_norm / (norm + 1e-8))
+        if norm > clip_norm:
+            delta_theta = delta_theta * (clip_norm / (norm + 1e-8))
         
         # Momentum with stability checks
         prev_norm = prev_delta.norm()
@@ -329,9 +329,9 @@ class CTWeightPerturber(ABC):
             Tuple[float, int]: (new_eta, updated_no_improvement_count)
         """
         eta_min = self.config.get('eta_min', 1e-6) 
-        eta_max = self.config.get('eta_max', 0.5),
-        eta_decay_factor = self.config.get('eta_decay_factor', 0.9),
-        eta_boost_factor = self.config.get('eta_boost_factor', 1.05),
+        eta_max = self.config.get('eta_max', 0.5)
+        eta_decay_factor = self.config.get('eta_decay_factor', 0.9)
+        eta_boost_factor = self.config.get('eta_boost_factor', 1.05)
         improvement_threshold = self.config.get('improvement_threshold', 1e-5)
         
         # Adaptive threshold based on loss magnitude
@@ -1012,9 +1012,9 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             loss = multi_marginal_ot_loss(
                 gen_out, self.evidence_list, virtual_samples,
                 blur=0.2,  # Larger blur for stability
-                lambda_virtual=min(lambda_virtual, 0.8),    # Cap at 0.8
-                lambda_multi=min(lambda_multi, 0.8),       # Cap at 0.8
-                lambda_entropy=min(lambda_entropy, 0.01)   # Cap at 0.01
+                lambda_virtual=lambda_virtual,
+                lambda_multi=lambda_multi,
+                lambda_entropy=lambda_entropy
             )
             
             # Additional stability: clamp loss

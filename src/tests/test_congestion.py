@@ -30,7 +30,7 @@ from weight_perturbation import (
     Generator,
     SobolevConstrainedCritic,
     CTWeightPerturberTargetNotGiven,
-    CongestedTransportVisualizer,
+    MultiMarginalCongestedTransportVisualizer,
 )
 
 # Set up plotting style
@@ -133,7 +133,7 @@ def run_section3_example():
         print(f" Domain {i+1}: {center}")
 
     # Initialize multi-marginal traffic flow visualizer
-    visualizer = CongestedTransportVisualizer(
+    visualizer = MultiMarginalCongestedTransportVisualizer(
         num_domains=args.num_evidence_domains,
         figsize=(22, 16),
         save_dir=f"test_results/plots/congestion_analysis/"

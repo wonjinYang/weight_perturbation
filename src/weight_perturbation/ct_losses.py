@@ -101,8 +101,8 @@ def global_w2_loss_and_grad_with_congestion(
             congestion_cost = congestion_cost_function(
                 flow_info['traffic_intensity'], sigma, lambda_congestion
             ).mean()
-            total_loss *= congestion_cost
-
+            # total_loss *= (1 + congestion_cost)
+            total_loss += congestion_cost
 
             # Add Sobolev regularization
             sobolev_loss = sobolev_regularization(critic, gen_out, sigma, lambda_sobolev)
@@ -245,7 +245,7 @@ def multi_marginal_ot_loss_with_congestion(
                 congestion_cost = congestion_cost_function(
                     flow_info['traffic_intensity'], sigma_gen, lambda_congestion
                 ).mean()
-                loss_multi *= congestion_cost
+                loss_multi += congestion_cost
 
                 # Add Sobolev regularization for this domain
                 sobolev_loss = sobolev_regularization(critic, generator_outputs, sigma_gen, lambda_sobolev)

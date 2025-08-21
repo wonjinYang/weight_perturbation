@@ -25,8 +25,8 @@ class WeightedSobolevRegularizer:
     
     def __init__(self, lambda_sobolev: float = 0.1, gradient_penalty_weight: float = 1.0):
         # Clamp parameters for stability
-        self.lambda_sobolev = max(0.001, min(lambda_sobolev, 0.5))
-        self.gradient_penalty_weight = max(0.1, min(gradient_penalty_weight, 2.0))
+        self.lambda_sobolev = lambda_sobolev
+        self.gradient_penalty_weight = gradient_penalty_weight
     
     def __call__(
         self,
@@ -73,9 +73,9 @@ class WeightedSobolevRegularizer:
             u_values = critic(samples.detach())
         
         # Clamp inputs for stability
-        u_values = torch.clamp(u_values, min=-100.0, max=100.0)
-        gradients = torch.clamp(gradients, min=-10.0, max=10.0)
-        sigma = torch.clamp(sigma, min=1e-6, max=10.0)
+        # u_values = torch.clamp(u_values, min=-100.0, max=100.0)
+        # gradients = torch.clamp(gradients, min=-10.0, max=10.0)
+        # sigma = torch.clamp(sigma, min=1e-6, max=10.0)
         
         # Ensure sigma has correct shape
         if sigma.dim() == 1 and len(sigma) == u_values.shape[0]:
@@ -120,8 +120,8 @@ class AdaptiveSobolevRegularizer(WeightedSobolevRegularizer):
         congestion_threshold: float = 0.2  # Higher threshold
     ):
         super().__init__(lambda_sobolev, gradient_penalty_weight)
-        self.adaptation_factor = max(0.1, min(adaptation_factor, 1.0))
-        self.congestion_threshold = max(0.1, congestion_threshold)
+        self.adaptation_factor = adaptation_factor
+        self.congestion_threshold = congestion_threshold
     
     def __call__(
         self,
@@ -154,7 +154,7 @@ class AdaptiveSobolevRegularizer(WeightedSobolevRegularizer):
                     # Maintain regularization in low congestion areas
                     adaptation_scale = 1.0 - 0.05 * self.adaptation_factor
                 
-                adaptation_scale = max(0.5, min(adaptation_scale, 2.0))  # Clamp scaling
+                # adaptation_scale = max(0.5, min(adaptation_scale, 2.0))  # Clamp scaling
                 result['total'] = result['total'] * adaptation_scale
                 result['adaptation_scale'] = adaptation_scale
             except Exception as e:
@@ -171,7 +171,7 @@ def sobolev_regularization(
     critic: torch.nn.Module,
     samples: torch.Tensor,
     sigma: torch.Tensor,
-    lambda_sobolev: float = 0.01
+    lambda_sobolev: float = 0.1
 ) -> torch.Tensor:
     """
     Compute weighted Sobolev norm regularization for the critic with stability.
@@ -188,8 +188,6 @@ def sobolev_regularization(
     Returns:
         torch.Tensor: Scalar Sobolev regularization loss.
     """
-    # Clamp lambda_sobolev for stability
-    lambda_sobolev = max(0.001, min(lambda_sobolev, 0.1))
     regularizer = WeightedSobolevRegularizer(lambda_sobolev)
     return regularizer(critic, samples, sigma)
 
@@ -239,9 +237,7 @@ class SobolevConstraintProjection:
                 if current_norm <= self.sobolev_bound:
                     return {'projected': False, 'norm_before': current_norm, 'norm_after': current_norm}
                 
-                # More conservative scaling
-                scale_factor = min(0.9, np.sqrt(self.sobolev_bound / (current_norm + 1e-8)))
-                scale_factor = max(0.5, scale_factor)  # Don't scale too aggressively
+                scale_factor = np.sqrt(self.sobolev_bound / (current_norm + 1e-8))
                 
                 for param in critic.parameters():
                     if param.requires_grad:
@@ -287,7 +283,7 @@ class SobolevConstrainedCritic(nn.Module):
         self.data_dim = data_dim
         self.hidden_dim = hidden_dim
         self.use_spectral_norm = use_spectral_norm
-        self.lambda_sobolev = max(0.001, min(lambda_sobolev, 0.1))
+        self.lambda_sobolev = lambda_sobolev
         
         # Build network layers
         layers = []
@@ -332,7 +328,7 @@ class SobolevConstrainedCritic(nn.Module):
         """Forward pass through the critic with output clamping."""
         output = self.model(x)
         # Clamp output to prevent explosion
-        return torch.clamp(output, min=-50.0, max=50.0)
+        return output
     
     def sobolev_regularization_loss(
         self,
@@ -386,7 +382,7 @@ def compute_sobolev_gradient_penalty(
         torch.Tensor: Sobolev-weighted gradient penalty.
     """
     # Clamp lambda_sobolev for stability
-    lambda_sobolev = max(0.001, min(lambda_sobolev, 0.1))
+    lambda_sobolev = lambda_sobolev
     
     batch_size = real_samples.shape[0]
     device = real_samples.device
@@ -404,7 +400,7 @@ def compute_sobolev_gradient_penalty(
         interpolated_sigma = alpha.mean(dim=1) * sigma_real + (1 - alpha.mean(dim=1)) * sigma_fake
         
         # Clamp interpolated values
-        interpolated_sigma = torch.clamp(interpolated_sigma, min=1e-6, max=10.0)
+        # interpolated_sigma = torch.clamp(interpolated_sigma, min=1e-6, max=10.0)
         
         interpolated_samples.requires_grad_(True)
         
@@ -458,8 +454,8 @@ class SobolevWGANLoss:
         use_adaptive_sobolev: bool = True
     ):
         # Clamp parameters for stability
-        self.lambda_gp = max(0.1, min(lambda_gp, 2.0))
-        self.lambda_sobolev = max(0.001, min(lambda_sobolev, 0.1))
+        self.lambda_gp = lambda_gp
+        self.lambda_sobolev = lambda_sobolev
         self.use_adaptive_sobolev = use_adaptive_sobolev
         
         if use_adaptive_sobolev:
@@ -486,8 +482,8 @@ class SobolevWGANLoss:
             # Standard WGAN critic loss with clamping
             critic_real = critic(real_samples).mean()
             critic_fake = critic(fake_samples).mean()
-            critic_real = torch.clamp(critic_real, min=-100.0, max=100.0)
-            critic_fake = torch.clamp(critic_fake, min=-100.0, max=100.0)
+            # critic_real = torch.clamp(critic_real, min=-100.0, max=100.0)
+            # critic_fake = torch.clamp(critic_fake, min=-100.0, max=100.0)
             wasserstein_loss = critic_fake - critic_real
             
             # Sobolev gradient penalty with reduced weight

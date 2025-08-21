@@ -445,7 +445,7 @@ def run_section2_example():
         generator, critic, real_sampler,
         epochs=args.pretrain_epochs,
         batch_size=args.batch_size,
-        lr=2e-4,
+        lr=1e-4,
         gp_lambda=0.,
         betas=(0., 0.95),
         device=device,
@@ -480,7 +480,7 @@ def run_section2_example():
         'eta_max': 0.5,             # Lower maximum
         'eta_decay_factor': 0.9,    # Less aggressive decay
         'eta_boost_factor': 1.05,    # Very conservative boost
-        'clip_norm': 0.4,            # Strong clipping
+        'clip_norm': 0.2,            # Strong clipping
         'momentum': 0.85,            # Reduced momentum
         'patience': 15,              # Increased patience
         'rollback_patience': 10,      # Increased rollback patience
@@ -545,11 +545,13 @@ def run_section2_example():
                 
                 # Compute delta_theta with congestion awareness
                 delta_theta = perturber._compute_delta_theta_with_congestion(
-                    grads, eta, 0.2, 0.85, delta_theta_prev, congestion_info
+                    grads, eta, perturber.config['clip_norm'], perturber.config['momentum'], delta_theta_prev, congestion_info
                 )
             else:
                 loss, grads = perturber._compute_loss_and_grad(pert_gen)
-                delta_theta = perturber._compute_delta_theta(grads, eta, 0.2, 0.85, delta_theta_prev)
+                delta_theta = perturber._compute_delta_theta(
+                    grads, eta, perturber.config['clip_norm'], perturber.config['momentum'], delta_theta_prev
+                )
                 
                 loss_hist.append(loss.item())
 
@@ -565,7 +567,7 @@ def run_section2_example():
             delta_theta_prev = delta_theta.clone()
             
             # Validate and adapt
-            w2_pert, improvement = perturber._validate_and_adapt(pert_gen, eta, w2_hist, 15, args.verbose, step)
+            w2_pert, improvement = perturber._validate_and_adapt(pert_gen, eta, w2_hist, perturber.config['patience'], args.verbose, step)
             
             # Update best state
             best_w2, best_vec = perturber._update_best_state(w2_pert, pert_gen, best_w2, best_vec)
