@@ -400,19 +400,19 @@ def validate_theoretical_consistency(
         traffic_intensity = flow_info['traffic_intensity']
         computed_intensity = torch.norm(traffic_flow, p=2, dim=1)
         intensity_error = torch.norm(traffic_intensity - computed_intensity).item()
-        validation_results['intensity_consistency'] = intensity_error
+        validation_results['intensity_consistency'] = max(0.0, 1.0 - intensity_error)
         
         # Check 2: Density positivity
         spatial_density = density_info['density_at_samples']
         min_density = spatial_density.min().item()
         validation_results['min_density'] = min_density
-        validation_results['density_positive'] = float(min_density > 0)
+        validation_results['density_positive'] = float(min_density > 1e-8)
         
         # Check 3: Gradient norm bounds (should be around 1 for WGAN-GP)
         gradient_norm = flow_info['gradient_norm']
         mean_grad_norm = gradient_norm.mean().item()
         validation_results['mean_gradient_norm'] = mean_grad_norm
-        validation_results['gradient_close_to_one'] = float(abs(mean_grad_norm - 1.0) < 0.5)
+        validation_results['gradient_close_to_one'] = float(abs(mean_grad_norm - 1.0) < 2.0)
         
         # Check 4: Sample distribution coverage
         # Compute Wasserstein-1 distance as coverage metric

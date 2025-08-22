@@ -97,7 +97,7 @@ class CTWeightPerturber(ABC):
             'clip_norm': 0.6,             # Increased from 0.4
             'momentum': 0.85,             # Slightly reduced
             'patience': 15,               # Reduced patience
-            'rollback_patience': 5,       # Reduced rollback patience
+            'rollback_patience': 10,       # Reduced rollback patience
             'improvement_threshold': 5e-6, # More lenient
             'lambda_congestion': 1.0,
             'lambda_sobolev': 0.1,

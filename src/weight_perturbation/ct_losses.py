@@ -327,9 +327,15 @@ def multi_marginal_ot_loss_with_congestion(
                 sigma_gen = density_info['density_at_samples'][:generator_outputs.shape[0]]
                 
                 # Compute traffic flow for this domain
-                def dummy_generator(z):
-                    return generator_outputs
-                
+                class DummyGenerator(torch.nn.Module):
+                    def __init__(self, fixed_output):
+                        super().__init__()
+                        self.fixed_output = fixed_output
+                    
+                    def forward(self, z):
+                        return self.fixed_output
+                dummy_generator = DummyGenerator(generator_outputs).to(generator_outputs.device)
+                                
                 flow_info = compute_traffic_flow(
                     critic, dummy_generator, 
                     torch.randn(generator_outputs.shape[0], 2, device=generator_outputs.device), 
@@ -416,8 +422,10 @@ def multi_marginal_ot_loss_with_congestion(
     if enforce_mass_conservation_flag and all_target_densities and all_current_densities:
         try:
             # Compute average target and current densities across domains
-            avg_target_density = torch.stack(all_target_densities).mean(dim=0)
-            avg_current_density = torch.stack(all_current_densities).mean(dim=0)
+            all_target_densities = torch.stack([F.interpolate(d.unsqueeze(0), size=generator_outputs.shape, mode='linear') for d in all_target_densities])
+            all_current_densities = torch.stack([F.interpolate(d.unsqueeze(0), size=generator_outputs.shape, mode='linear') for d in all_current_densities])
+            avg_target_density = all_target_densities.mean(dim=0).squeeze()
+            avg_current_density = all_current_densities.mean(dim=0).squeeze()
             
             # Resample to match generator output size
             if avg_target_density.shape[0] != generator_outputs.shape[0]:
