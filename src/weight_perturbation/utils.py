@@ -270,3 +270,47 @@ def set_seed(seed: int = 42) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def safe_density_resize(target_density: torch.Tensor, current_density: torch.Tensor, target_size: int):
+    """
+    Safely resize density tensors to match target size.
+    
+    Args:
+        target_density (torch.Tensor): Target density tensor
+        current_density (torch.Tensor): Current density tensor  
+        target_size (int): Target size to resize to
+        
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: Resized density tensors
+    """
+    # Ensure tensors are 1D
+    if target_density.dim() > 1:
+        target_density = target_density.flatten()
+    if current_density.dim() > 1:
+        current_density = current_density.flatten()
+    
+    # Resize target_density to match target_size
+    if target_density.shape[0] > target_size:
+        # Randomly sample if too many points
+        indices = torch.randperm(target_density.shape[0])[:target_size]
+        target_density_resized = target_density[indices]
+    elif target_density.shape[0] < target_size:
+        # Repeat if too few points
+        repeat_factor = (target_size // target_density.shape[0]) + 1
+        target_density_repeated = target_density.repeat(repeat_factor)
+        target_density_resized = target_density_repeated[:target_size]
+    else:
+        target_density_resized = target_density
+    
+    # Resize current_density to match target_size
+    if current_density.shape[0] > target_size:
+        indices = torch.randperm(current_density.shape[0])[:target_size]
+        current_density_resized = current_density[indices]
+    elif current_density.shape[0] < target_size:
+        repeat_factor = (target_size // current_density.shape[0]) + 1
+        current_density_repeated = current_density.repeat(repeat_factor)
+        current_density_resized = current_density_repeated[:target_size]
+    else:
+        current_density_resized = current_density
+    
+    return target_density_resized, current_density_resized

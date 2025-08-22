@@ -283,12 +283,23 @@ class CTWeightPerturber(ABC):
         Returns:
             torch.Tensor: Computed delta_theta.
         """
-        # Check for problematic gradients (reduced clamping)
+        # Safety check: ensure grads is a tensor
+        if not isinstance(grads, torch.Tensor):
+            print(f"Warning: grads is not a tensor (type: {type(grads)}), creating zero tensor")
+            if hasattr(self, 'generator') and self.generator is not None:
+                total_params = sum(p.numel() for p in self.generator.parameters())
+                device = next(self.generator.parameters()).device
+            else:
+                total_params = 10000  # fallback
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            grads = torch.zeros(total_params, device=device)
+        
+        # Check for problematic gradients
         if torch.isnan(grads).any() or torch.isinf(grads).any():
             print("Warning: NaN or inf detected in gradients, using zero gradients")
             grads = torch.zeros_like(grads)
         
-        # Apply adaptive gradient scaling based on magnitude (less aggressive)
+        # Apply adaptive gradient scaling based on magnitude
         grad_norm = grads.norm()
         if grad_norm > 50.0:  # Increased threshold
             grads = grads * (20.0 / grad_norm)  # Less aggressive scaling

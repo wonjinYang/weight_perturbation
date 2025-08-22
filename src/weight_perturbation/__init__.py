@@ -46,7 +46,8 @@ from .utils import (
     plot_distributions,
     load_config,
     compute_device,
-    set_seed
+    set_seed,
+    safe_density_resize,
 )
 
 # Enhanced theoretical components (optional import)
@@ -137,7 +138,7 @@ __all__ = [
     
     # Utils
     'parameters_to_vector', 'vector_to_parameters', 'plot_distributions',
-    'load_config', 'compute_device', 'set_seed'
+    'load_config', 'compute_device', 'set_seed', 'safe_density_resize'
 ]
 
 # Add enhanced theoretical components to __all__ if available
