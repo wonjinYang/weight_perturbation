@@ -68,13 +68,13 @@ class CongestionTracker:
         
         return (recent_cost - previous_cost) / (previous_cost + 1e-8) > threshold
     
-    def check_theoretical_consistency(self, threshold: float = 0.05) -> bool:
+    def check_theoretical_consistency(self, threshold: float = 0.8) -> bool:
         """Check theoretical consistency based on mass conservation and continuity."""
-        if len(self.history['mass_conservation_error']) < 1:
+        if len(self.history['theoretical_consistency']) < 1:
             return True
         
-        mass_error = self.history['mass_conservation_error'][-1]
-        return mass_error < threshold
+        theoretical_consistency = self.history['theoretical_consistency'][-1]
+        return theoretical_consistency > threshold
     
     def get_average_congestion(self, window: int = 10) -> float:
         """Get average congestion over recent window."""

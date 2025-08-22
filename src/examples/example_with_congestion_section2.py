@@ -607,7 +607,7 @@ def parse_args():
     parser.add_argument("--perturb_steps", type=int, default=50, help="Perturbation steps")
     parser.add_argument("--batch_size", type=int, default=96, help="Training batch size")
     parser.add_argument("--eval_batch_size", type=int, default=600, help="Evaluation batch size")
-    parser.add_argument("--eta_init", type=float, default=0.08, help="Initial learning rate")
+    parser.add_argument("--eta_init", type=float, default=0.008, help="Initial learning rate")
     parser.add_argument("--enable_congestion", action="store_true", default=True, help="Enable congestion tracking")
     parser.add_argument("--use_sobolev_critic", action="store_true", default=True, help="Use Sobolev-constrained critic")
     parser.add_argument("--enable_mass_conservation", action="store_true", default=True, help="Enable mass conservation enforcement")
@@ -714,14 +714,14 @@ def run_section2_example():
         'momentum': 0.85,
         'patience': 15,
         'rollback_patience': 10,
-        'lambda_entropy': 0.012,
+        'lambda_entropy': 0.1,
         'lambda_virtual': 0.8,
         'lambda_multi': 1.0,
         'lambda_congestion': 1.0,
-        'lambda_sobolev': 0.1,
+        'lambda_sobolev': 0.5,
         'eval_batch_size': args.eval_batch_size,
         # Parameters
-        'mass_conservation_weight': 0.5,
+        'mass_conservation_weight': 50.0,
         'theoretical_validation': args.enable_theoretical_validation,
         'congestion_threshold': 0.3,
         'improvement_threshold': 1e-5
@@ -752,6 +752,7 @@ def run_section2_example():
             lambda_congestion=perturber.config.get('lambda_congestion', 1.0),
             lambda_sobolev=perturber.config.get('lambda_sobolev', 0.1),
             lambda_entropy=perturber.config.get('lambda_entropy', 0.012),
+            mass_conservation_weight=perturber.config.get('mass_conservation_weight', 1.0),
             enable_mass_conservation=args.enable_mass_conservation,
             enable_theoretical_validation=args.enable_theoretical_validation
         )
@@ -861,7 +862,7 @@ def run_section2_example():
                 delta_theta_prev = torch.zeros_like(delta_theta_prev)
                 
                 # Rollback handling
-                if consecutive_rollbacks >= 3:
+                if consecutive_rollbacks >= 5:
                     if args.verbose:
                         print(f"Too many rollbacks, stopping early")
                     break

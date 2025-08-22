@@ -46,6 +46,7 @@ def global_w2_loss_and_grad_with_congestion(
     use_direct_w2: bool = True,
     w2_weight: float = 1.0,
     map_weight: float = 0.5,
+    mass_conservation_weight: float = 1.0,
     enforce_mass_conservation_flag: bool = True,
     theoretical_validation: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
@@ -130,8 +131,8 @@ def global_w2_loss_and_grad_with_congestion(
                 )
                 
                 # Congestion scaling factor
-                congestion_scale = 1.0 + 0.1 * (h_second * flow_info['traffic_intensity']).mean()
-                congestion_scale = max(0.5, min(congestion_scale, 3.0))
+                congestion_scale = 1.0 + 0.05 * (h_second * flow_info['traffic_intensity']).mean()
+                congestion_scale = max(0.5, min(congestion_scale, 1.5))
                 
                 total_loss = total_loss * congestion_scale
                 congestion_info['congestion_scale'] = congestion_scale
@@ -140,7 +141,7 @@ def global_w2_loss_and_grad_with_congestion(
 
             # Add Sobolev regularization with adaptive strength
             if flow_info['traffic_intensity'].mean() > 0.1:
-                adaptive_lambda_sobolev = lambda_sobolev * (1.0 + 0.2 * flow_info['traffic_intensity'].mean())
+                adaptive_lambda_sobolev = lambda_sobolev * (0.5 + 0.2 * flow_info['traffic_intensity'].mean())
             else:
                 adaptive_lambda_sobolev = lambda_sobolev
                 
@@ -150,7 +151,7 @@ def global_w2_loss_and_grad_with_congestion(
             # Mass conservation enforcement
             if enforce_mass_conservation_flag:
                 try:
-                    target_density_info = compute_spatial_density(target_samples, bandwidth=0.15)
+                    target_density_info = compute_spatial_density(target_samples, bandwidth=0.25)
                     target_density = target_density_info['density_at_samples']
                     
                     # Use density resizing
@@ -163,11 +164,11 @@ def global_w2_loss_and_grad_with_congestion(
                         target_density_resized,
                         sigma_resized,
                         gen_out,
-                        lagrange_multiplier=0.1
+                        lagrange_multiplier=mass_conservation_weight,
                     )
                     
                     # Add mass conservation penalty
-                    mass_penalty = 0.1 * mass_conservation['mass_conservation_error']
+                    mass_penalty = 1.0 * mass_conservation['mass_conservation_error']
                     total_loss += mass_penalty
                     
                     congestion_info['mass_conservation_error'] = mass_conservation['mass_conservation_error']
@@ -259,6 +260,7 @@ def multi_marginal_ot_loss_with_congestion(
     lambda_congestion: float = 1.0,
     lambda_sobolev: float = 0.1,
     track_congestion: bool = True,
+    mass_conservation_weight: float = 1.0,
     enforce_mass_conservation_flag: bool = True,
     theoretical_validation: bool = True
 ) -> Tuple[torch.Tensor, Optional[Dict[str, List[Dict]]]]:
@@ -284,6 +286,7 @@ def multi_marginal_ot_loss_with_congestion(
         lambda_congestion (float): Congestion parameter.
         lambda_sobolev (float): Sobolev regularization strength.
         track_congestion (bool): Whether to track congestion metrics.
+        mass_conservation_weight (float): Coefficient for mass conservation.
         enforce_mass_conservation_flag (bool): Whether to enforce mass conservation.
         theoretical_validation (bool): Whether to perform theoretical validation.
     
@@ -354,7 +357,7 @@ def multi_marginal_ot_loss_with_congestion(
             try:
                 # Compute spatial density for this evidence domain
                 all_samples = torch.cat([generator_outputs, evidence], dim=0)
-                density_info = compute_spatial_density(all_samples, bandwidth=0.15)
+                density_info = compute_spatial_density(all_samples, bandwidth=0.25)
                 sigma_gen = density_info['density_at_samples'][:generator_outputs.shape[0]]
                 
                 # Compute traffic flow for this domain
@@ -383,16 +386,16 @@ def multi_marginal_ot_loss_with_congestion(
                     h_second = get_congestion_second_derivative(
                         flow_info['traffic_intensity'], sigma_gen, lambda_congestion
                     )
-                    domain_congestion_scale = 1.0 + 0.15 * (h_second * flow_info['traffic_intensity']).mean()
-                    domain_congestion_scale = max(0.3, min(domain_congestion_scale, 4.0))
+                    domain_congestion_scale = 1.0 + 0.1 * (h_second * flow_info['traffic_intensity']).mean()
+                    domain_congestion_scale = max(0.5, min(domain_congestion_scale, 1.5))
                     pairwise_loss = pairwise_loss * domain_congestion_scale
                 else:
                     domain_congestion_scale = 1.0
 
                 # Add adaptive Sobolev regularization for this domain
                 domain_intensity_mean = flow_info['traffic_intensity'].mean()
-                if domain_intensity_mean > 0.05:
-                    adaptive_lambda = lambda_sobolev * (1.0 + 0.3 * domain_intensity_mean)
+                if domain_intensity_mean > 0.1:
+                    adaptive_lambda = lambda_sobolev * (0.5 + 0.3 * domain_intensity_mean)
                 else:
                     adaptive_lambda = lambda_sobolev
                     
@@ -401,7 +404,7 @@ def multi_marginal_ot_loss_with_congestion(
                 
                 # Collect densities for multi-domain mass conservation
                 if enforce_mass_conservation_flag:
-                    evidence_density_info = compute_spatial_density(evidence, bandwidth=0.15)
+                    evidence_density_info = compute_spatial_density(evidence, bandwidth=0.25)
                     evidence_density = evidence_density_info['density_at_samples']
                     all_target_densities.append(evidence_density)
                     all_current_densities.append(sigma_gen)
@@ -476,11 +479,11 @@ def multi_marginal_ot_loss_with_congestion(
                 avg_target_density,
                 avg_current_density,
                 generator_outputs,
-                lagrange_multiplier=0.05
+                lagrange_multiplier=mass_conservation_weight
             )
             
             # Add multi-domain mass conservation penalty
-            mass_penalty = 0.05 * multi_domain_conservation['mass_conservation_error']
+            mass_penalty = 1.0 * multi_domain_conservation['mass_conservation_error']
             loss_multi += mass_penalty
             
             if multi_congestion_info:
@@ -552,6 +555,7 @@ class CongestionAwareLossFunction:
         lambda_entropy: float = 0.012,
         congestion_cost_type: str = 'quadratic_linear',
         use_adaptive_weights: bool = True,
+        mass_conservation_weight: float = 1.0,
         enable_mass_conservation: bool = True,
         enable_theoretical_validation: bool = True
     ):
@@ -560,6 +564,7 @@ class CongestionAwareLossFunction:
         self.lambda_entropy = lambda_entropy
         self.congestion_cost_type = congestion_cost_type
         self.use_adaptive_weights = use_adaptive_weights
+        self.mass_conservation_weight = mass_conservation_weight
         self.enable_mass_conservation = enable_mass_conservation
         self.enable_theoretical_validation = enable_theoretical_validation
         
@@ -593,6 +598,7 @@ class CongestionAwareLossFunction:
             lambda_congestion=self.lambda_congestion,
             lambda_sobolev=self.lambda_sobolev,
             track_congestion=True,
+            mass_conservation_weight=self.mass_conservation_weight,
             enforce_mass_conservation_flag=self.enable_mass_conservation,
             theoretical_validation=self.enable_theoretical_validation
         )
@@ -633,7 +639,7 @@ class CongestionAwareLossFunction:
             if len(self.consistency_history) > 100:
                 self.consistency_history = self.consistency_history[-100:]
     
-    def check_congestion_constraints(self, threshold: float = 0.15) -> bool:
+    def check_congestion_constraints(self, threshold: float = 0.3) -> bool:
         """Congestion constraint checking with theoretical validation."""
         # Check basic congestion increase
         congestion_ok = not self.congestion_tracker.check_congestion_increase(threshold)
@@ -673,17 +679,17 @@ class CongestionAwareLossFunction:
             return
         
         # Adapt lambda_sobolev based on theoretical consistency
-        consistency = statistics.get('recent_theoretical_consistency', 0.5)
-        if consistency < 0.3:  # Low consistency needs more regularization
+        consistency = statistics.get('recent_theoretical_consistency', 0.7)
+        if consistency < 0.5:  # Low consistency needs more regularization
             self.lambda_sobolev = min(self.lambda_sobolev * 1.1, 0.5)
-        elif consistency > 0.8:  # High consistency can reduce regularization
+        elif consistency > 0.9:  # High consistency can reduce regularization
             self.lambda_sobolev = max(self.lambda_sobolev * 0.95, 0.01)
         
         # Adapt lambda_congestion based on congestion trends
         congestion_trend = statistics.get('congestion_trend', 0.0)
-        if congestion_trend > 0.1:  # Increasing congestion
+        if congestion_trend > 0.2:  # Increasing congestion
             self.lambda_congestion = min(self.lambda_congestion * 1.05, 2.0)
-        elif congestion_trend < -0.05:  # Decreasing congestion
+        elif congestion_trend < -0.1:  # Decreasing congestion
             self.lambda_congestion = max(self.lambda_congestion * 0.98, 0.1)
 
 
@@ -734,8 +740,8 @@ def compute_convergence_metrics(
     if include_theoretical_metrics:
         try:
             # Compute spatial density metrics
-            gen_density_info = compute_spatial_density(gen_samples)
-            target_density_info = compute_spatial_density(target_or_evidence)
+            gen_density_info = compute_spatial_density(gen_samples, bandwidth=0.25)
+            target_density_info = compute_spatial_density(target_or_evidence, bandwidth=0.25)
             
             gen_density = gen_density_info['density_at_samples']
             target_density = target_density_info['density_at_samples']

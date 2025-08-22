@@ -79,6 +79,7 @@ class CTWeightPerturber(ABC):
             lambda_congestion=self.config.get('lambda_congestion', 1.0),
             lambda_sobolev=self.config.get('lambda_sobolev', 0.1),
             lambda_entropy=self.config.get('lambda_entropy', 0.012),
+            mass_conservation_weight=self.config.get('mass_conservation_weight', 1.0),
         )
         
         # Initialize common parameters
@@ -103,7 +104,7 @@ class CTWeightPerturber(ABC):
             'lambda_sobolev': 0.1,
             'lambda_entropy': 0.012,
             'congestion_threshold': 0.2,  # More lenient
-            'mass_conservation_weight': 0.1,  # New parameter
+            'mass_conservation_weight': 1.0,  # New parameter
             'theoretical_validation': True,   # New parameter
         }
     
@@ -239,7 +240,7 @@ class CTWeightPerturber(ABC):
                         target_density[:gen_samples.shape[0]] if target_density.shape[0] >= gen_samples.shape[0] else target_density,
                         current_density,
                         gen_samples,
-                        lagrange_multiplier=self.config.get('mass_conservation_weight', 0.1)
+                        lagrange_multiplier=self.config.get('mass_conservation_weight', 1.0)
                     )
                     
                     # The mass conservation correction affects the data space,
@@ -746,7 +747,8 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             track_congestion=True,
             use_direct_w2=True,
             w2_weight=1.0,
-            map_weight=0.5
+            map_weight=0.5,
+            mass_conservation_weight=1.0,
         )
         return loss, grads, congestion_info
     
@@ -770,6 +772,7 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             use_direct_w2=True,
             w2_weight=1.0,
             map_weight=0.5,
+            mass_conservation_weight=1.0,
         )
         return loss, grads
     
@@ -1168,7 +1171,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         return avg_info
     
     def _compute_loss_and_grad(self, pert_gen: Generator, virtual_samples: torch.Tensor,
-                               lambda_entropy: float, lambda_virtual: float, lambda_multi: float
+                               lambda_entropy: float, lambda_virtual: float, lambda_multi: float, mass_conservation_weight: float
                                ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Multi-marginal OT loss computation with improved stability and bounds.
@@ -1186,7 +1189,8 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 blur=0.15,  # Reasonable blur for stability
                 lambda_virtual=min(lambda_virtual, 1.0),    # Less restrictive cap
                 lambda_multi=min(lambda_multi, 1.0),       # Less restrictive cap
-                lambda_entropy=min(lambda_entropy, 0.02)   # Less restrictive cap
+                lambda_entropy=min(lambda_entropy, 0.02),   # Less restrictive cap
+                mass_conservation_weight=mass_conservation_weight
             )
             
             # Less aggressive clamping
@@ -1259,6 +1263,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 lambda_virtual=self.config.get('lambda_virtual', 0.8),
                 lambda_multi=self.config.get('lambda_multi', 1.0),
                 lambda_entropy=self.config.get('lambda_entropy', 0.012),
+                mass_conservation_weight=self.config.get('mass_conservation_weight', 1.0),
             ).item()
 
             ot_pert = multi_marginal_ot_loss(
@@ -1267,6 +1272,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 lambda_virtual=self.config.get('lambda_virtual', 0.8),
                 lambda_multi=self.config.get('lambda_multi', 1.0),
                 lambda_entropy=self.config.get('lambda_entropy', 0.012),
+                mass_conservation_weight=self.config.get('mass_conservation_weight', 1.0),
             ).item()
             
         except Exception as e:

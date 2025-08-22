@@ -187,14 +187,14 @@ def run_section3_example():
         'momentum': 0.85,
         'patience': 15,
         'rollback_patience': 10,
-        'lambda_entropy': 0.01,
+        'lambda_entropy': 0.05,
         'lambda_virtual': 0.8,
         'lambda_multi': 1.0,
         'lambda_congestion': 1.0,
         'lambda_sobolev': 0.1,
         'eval_batch_size': args.eval_batch_size,
         # Multi-marginal parameters
-        'mass_conservation_weight': 0.5,
+        'mass_conservation_weight': 0.1,
         'theoretical_validation': args.enable_theoretical_validation,
         'congestion_threshold': 0.1,
         'cross_domain_regularization': 0.5,
@@ -206,6 +206,7 @@ def run_section3_example():
         lambda_congestion=perturber.config.get('lambda_congestion', 1.0),
         lambda_sobolev=perturber.config.get('lambda_sobolev', 0.1),
         lambda_entropy=perturber.config.get('lambda_entropy', 0.012),
+        mass_conservation_weight=perturber.config.get('mass_conservation_weight', 1.0),
         enable_mass_conservation=args.enable_mass_conservation,
         enable_theoretical_validation=args.enable_theoretical_validation
     )
@@ -323,7 +324,8 @@ def run_section3_example():
                     pert_gen, virtual_samples, 
                     perturber.config.get('lambda_entropy', 0.012),
                     perturber.config.get('lambda_virtual', 0.8),
-                    perturber.config.get('lambda_multi', 1.0)
+                    perturber.config.get('lambda_multi', 1.0),
+                    perturber.config.get('mass_conservation_weight', 1.0)
                 )
                 
                 # Verify grads is a tensor
@@ -423,7 +425,7 @@ def run_section3_example():
                             avg_target_density,
                             avg_current_density,
                             gen_samples,
-                            lagrange_multiplier=perturber.config.get('mass_conservation_weight', 0.1)
+                            lagrange_multiplier=perturber.config.get('mass_conservation_weight', 1.0)
                         )
                         
                         multi_domain_mass_error = multi_domain_conservation['mass_conservation_error'].item()
