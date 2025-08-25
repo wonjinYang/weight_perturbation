@@ -106,7 +106,7 @@ def run_section3_example():
                 data_dim=2, hidden_dim=256,
                 use_spectral_norm=True,
                 lambda_sobolev=0.1,
-                sobolev_bound=5.0
+                sobolev_bound=50.0
             ).to(device)
         else:
             from weight_perturbation import Critic
@@ -186,8 +186,8 @@ def run_section3_example():
         'clip_norm': 0.6,
         'momentum': 0.85,
         'patience': 15,
-        'rollback_patience': 10,
-        'lambda_entropy': 0.05,
+        'rollback_patience': np.inf,
+        'lambda_entropy': 0.,
         'lambda_virtual': 0.8,
         'lambda_multi': 1.0,
         'lambda_congestion': 1.0,

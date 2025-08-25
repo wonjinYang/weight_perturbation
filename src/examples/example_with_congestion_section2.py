@@ -650,7 +650,7 @@ def run_section2_example():
         critic = SobolevConstrainedCritic(
             data_dim=2, hidden_dim=256,
             use_spectral_norm=True, 
-            lambda_sobolev=0.1,
+            lambda_sobolev=0.5,
             sobolev_bound=50.0
         ).to(device)
         print("Using Sobolev-constrained critic with mass conservation integration")
@@ -713,10 +713,10 @@ def run_section2_example():
         'clip_norm': 0.6,
         'momentum': 0.85,
         'patience': 15,
-        'rollback_patience': 10,
-        'lambda_entropy': 0.1,
+        'rollback_patience': np.inf,
+        'lambda_entropy': 0.,
         'lambda_virtual': 0.8,
-        'lambda_multi': 1.0,
+        'lambda_multi': 2.0,
         'lambda_congestion': 1.0,
         'lambda_sobolev': 0.5,
         'eval_batch_size': args.eval_batch_size,
@@ -805,7 +805,7 @@ def run_section2_example():
                 except Exception as e:
                     print(f"Warning: Congestion computation failed at step {step}: {e}")
                     # Fallback to basic computation
-                    loss, grads = perturber._compute_loss_and_grad(pert_gen)
+                    loss, grads = perturber._compute_loss_and_grad_with_congestion(pert_gen)
                     delta_theta = perturber._compute_delta_theta(
                         grads, eta, perturber.config.get('clip_norm', 0.6), 
                         perturber.config.get('momentum', 0.85), delta_theta_prev

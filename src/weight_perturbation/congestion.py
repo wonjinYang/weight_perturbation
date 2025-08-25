@@ -252,7 +252,9 @@ def compute_traffic_flow(
     gradient_norm_safe = gradient_norm + 1e-8 #torch.clamp(gradient_norm, min=1e-8)
     
     # Compute (|∇u| - 1)_+ 
-    gradient_excess = F.relu(gradient_norm - 1.0)
+    # gradient_excess = F.relu(gradient_norm - 1.0)
+    gradient_excess = torch.clip(gradient_norm, min=1.0)
+    
     
     # Ensure sigma has correct shape
     if sigma.dim() == 1:

@@ -26,9 +26,10 @@ from .congestion import (
 )
 from .ct_losses import (
     global_w2_loss_and_grad_with_congestion,
+    multi_marginal_ot_loss_with_congestion,
     CongestionAwareLossFunction,
 )
-from .losses import compute_wasserstein_distance, multi_marginal_ot_loss
+from .losses import global_w2_loss_and_grad, compute_wasserstein_distance
 
 
 class CTWeightPerturber(ABC):
@@ -746,9 +747,9 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
             lambda_sobolev=self.config.get('lambda_sobolev', 0.1),
             track_congestion=True,
             use_direct_w2=True,
-            w2_weight=1.0,
-            map_weight=0.5,
-            mass_conservation_weight=1.0,
+            w2_weight=self.config.get('w2_weight', 1.0),
+            map_weight=self.config.get('map_weight', 0.5),
+            mass_conservation_weight=self.config.get('mass_conservation_weight', 0.5),
         )
         return loss, grads, congestion_info
     
@@ -763,16 +764,16 @@ class CTWeightPerturberTargetGiven(CTWeightPerturber):
         noise = torch.randn(self.eval_batch_size, self.noise_dim, device=self.device)
         
         # Use improved loss function
-        loss, grads, _ = global_w2_loss_and_grad_with_congestion(
+        loss, grads, _ = global_w2_loss_and_grad(
             pert_gen, 
             self.target_samples, 
             noise,
             critic=self.critic,
             track_congestion=False,
             use_direct_w2=True,
-            w2_weight=1.0,
-            map_weight=0.5,
-            mass_conservation_weight=1.0,
+            w2_weight=self.config.get('w2_weight', 1.0),
+            map_weight=self.config.get('map_weight', 0.5),
+            mass_conservation_weight=self.config.get('mass_conservation_weight', 0.5),
         )
         return loss, grads
     
@@ -1184,12 +1185,12 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
         gen_out = pert_gen(noise)
         
         try:
-            loss = multi_marginal_ot_loss(
+            loss, _ = multi_marginal_ot_loss_with_congestion(
                 gen_out, self.evidence_list, virtual_samples,
                 blur=0.15,  # Reasonable blur for stability
-                lambda_virtual=min(lambda_virtual, 1.0),    # Less restrictive cap
-                lambda_multi=min(lambda_multi, 1.0),       # Less restrictive cap
-                lambda_entropy=min(lambda_entropy, 0.02),   # Less restrictive cap
+                lambda_virtual=lambda_virtual,
+                lambda_multi=lambda_multi,
+                lambda_entropy=lambda_entropy,
                 mass_conservation_weight=mass_conservation_weight
             )
             
@@ -1257,7 +1258,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
             pert_out = pert_gen(noise_eval)
 
         try:
-            ot_orig = multi_marginal_ot_loss(
+            ot_orig, _ = multi_marginal_ot_loss_with_congestion(
                 orig_out, self.evidence_list, virtual_samples,
                 blur=0.15,
                 lambda_virtual=self.config.get('lambda_virtual', 0.8),
@@ -1266,7 +1267,7 @@ class CTWeightPerturberTargetNotGiven(CTWeightPerturber):
                 mass_conservation_weight=self.config.get('mass_conservation_weight', 1.0),
             ).item()
 
-            ot_pert = multi_marginal_ot_loss(
+            ot_pert, _ = multi_marginal_ot_loss_with_congestion(
                 pert_out, self.evidence_list, virtual_samples,
                 blur=0.15,
                 lambda_virtual=self.config.get('lambda_virtual', 0.8),

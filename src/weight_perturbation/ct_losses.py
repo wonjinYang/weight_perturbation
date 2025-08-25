@@ -213,20 +213,20 @@ def global_w2_loss_and_grad_with_congestion(
             }
     
     # Add diversity regularization
-    if gen_out.shape[0] > 1:
-        try:
-            gen_cov = torch.cov(gen_out.t())
-            diversity_loss = -torch.logdet(gen_cov + 1e-6 * torch.eye(gen_out.shape[1], device=gen_out.device))
-            total_loss += 0.01 * diversity_loss
-            if congestion_info is not None:
-                congestion_info['diversity_loss'] = diversity_loss
-        except:
-            # Fallback diversity term
-            gen_std = gen_out.std(dim=0).mean()
-            diversity_loss = -torch.log(gen_std + 1e-6)
-            total_loss += 0.01 * diversity_loss
-            if congestion_info is not None:
-                congestion_info['diversity_loss'] = diversity_loss
+    # if gen_out.shape[0] > 1:
+    #     try:
+    #         gen_cov = torch.cov(gen_out.t())
+    #         diversity_loss = -torch.logdet(gen_cov + 1e-6 * torch.eye(gen_out.shape[1], device=gen_out.device))
+    #         total_loss += 0.01 * diversity_loss
+    #         if congestion_info is not None:
+    #             congestion_info['diversity_loss'] = diversity_loss
+    #     except:
+    #         # Fallback diversity term
+    #         gen_std = gen_out.std(dim=0).mean()
+    #         diversity_loss = -torch.log(gen_std + 1e-6)
+    #         total_loss += 0.01 * diversity_loss
+    #         if congestion_info is not None:
+    #             congestion_info['diversity_loss'] = diversity_loss
     
     # Compute gradients
     generator.zero_grad()
@@ -624,6 +624,7 @@ class CongestionAwareLossFunction:
             lambda_sobolev=self.lambda_sobolev,
             lambda_entropy=self.lambda_entropy,
             track_congestion=True,
+            mass_conservation_weight=self.mass_conservation_weight,
             enforce_mass_conservation_flag=self.enable_mass_conservation,
             theoretical_validation=self.enable_theoretical_validation
         )
